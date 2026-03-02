@@ -2,27 +2,34 @@
 
 [![CI](https://github.com/mgaitan/telegram-acp-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/mgaitan/telegram-acp-bot/actions/workflows/ci.yml)
 [![docs](https://img.shields.io/badge/docs-blue.svg?style=flat)](https://mgaitan.github.io/telegram-acp-bot/)
-[![pypi version](https://img.shields.io/pypi/v/telegram-acp-bot.svg)](https://pypi.org/project/telegram-acp-bot/)
 [![Changelog](https://img.shields.io/github/v/release/mgaitan/telegram-acp-bot?include_prereleases&label=changelog)](https://github.com/mgaitan/telegram-acp-bot/releases)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/mgaitan/telegram-acp-bot/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/mgaitan/telegram-acp-bot/blob/main/LICENSE)
 
-A Telegram bot that implements Agent Client Protocol to interact with AI agents
+A Telegram bot that implements the [Agent Client Protocol](https://agentclientprotocol.com/) to interact with AI agents.
+
+Project documentation: <https://mgaitan.github.io/telegram-acp-bot/>
+
+## Status
+
+This project is in **alpha** and under heavy active development.
+
+Development has included extensive use of `gpt-5.3-codex`.
 
 ## Quick Start
 
 Run directly without installing via `uvx`:
 
 ```bash
-uvx --with=telegram-acp-bot acp-bot --help
+uvx --from git+https://github.com/mgaitan/telegram-acp-bot acp-bot --help
 ```
 
 Run the bot with a real ACP agent:
 
 ```bash
 TELEGRAM_BOT_TOKEN=123456:abc \
-ACP_AGENT_COMMAND="codex-acp" \
-uvx --with=telegram-acp-bot acp-bot
+ACP_AGENT_COMMAND="npx @zed-industries/codex-acp" \
+uvx --from git+https://github.com/mgaitan/telegram-acp-bot acp-bot
 ```
 
 Current interaction capabilities:
@@ -41,24 +48,44 @@ Message flow:
 - The final answer is sent as a separate message after activity blocks.
 - If the final text is empty, no dummy "(no text response)" message is sent.
 
-You can also store variables in a local `.env` file (it is gitignored):
+## Telegram Bot Token
+
+Create your token with [@BotFather](https://t.me/BotFather):
+
+1. Open BotFather and run `/newbot`.
+2. Choose a bot name and username.
+3. Copy the token returned by BotFather.
+
+Store the token in your local `.env` file (gitignored):
 
 ```env
 TELEGRAM_BOT_TOKEN=123456:abc
+ACP_AGENT_COMMAND="npx @zed-industries/codex-acp"
 ACP_PERMISSION_MODE=ask
 ACP_PERMISSION_EVENT_OUTPUT=stdout
 ACP_STDIO_LIMIT=8388608
 ```
 
+## Agent Command
+
+Set `ACP_AGENT_COMMAND` to the ACP-compatible agent command you want the bot to run.
+
+Example:
+
+```env
+ACP_AGENT_COMMAND="npx @zed-industries/codex-acp"
+```
+
 To install the tool permanently:
 
 ```bash
-uv tool install telegram-acp-bot
+uv tool install --from git+https://github.com/mgaitan/telegram-acp-bot acp-bot
 ```
 
 ## Development
 
 - Install dependencies with `uv sync`.
+- Then run `uv run acp-bot`
 - New dependency releases are delayed by one week via `uv` cooldown (`[tool.uv].exclude-newer = "1 week"`), with per-package overrides when required (for example, `ty`).
 - Run the QA bundle with [`ty`](https://github.com/astral-sh/ty):
 
