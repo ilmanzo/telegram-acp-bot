@@ -19,6 +19,7 @@ from telegram_acp_bot.acp_app.models import (
     FilePayload,
     ImagePayload,
     PermissionRequest,
+    ResumableSession,
 )
 from telegram_acp_bot.core.session_registry import SessionRegistry
 from telegram_acp_bot.telegram import bot as bot_module
@@ -181,6 +182,79 @@ class LiveActivityService:
         self._activity_handler = handler
 
 
+class ResumeService:
+    def __init__(self) -> None:
+        self.loaded: tuple[int, str, Path] | None = None
+        self.fail_load = False
+        self.list_supported = True
+        self.items: tuple[ResumableSession, ...] = (
+            ResumableSession(
+                session_id="s-resume-1",
+                workspace=Path("/tmp/ws1"),
+                title="First session",
+                updated_at="2026-03-02T12:00:00Z",
+            ),
+            ResumableSession(
+                session_id="s-resume-2",
+                workspace=Path("/tmp/ws2"),
+                title="Second session",
+                updated_at="2026-03-02T11:00:00Z",
+            ),
+        )
+
+    async def new_session(self, *, chat_id: int, workspace):
+        del workspace
+        return f"s-{chat_id}"
+
+    async def load_session(self, *, chat_id: int, session_id: str, workspace: Path) -> str:
+        if self.fail_load:
+            raise RuntimeError("load failed")
+        self.loaded = (chat_id, session_id, workspace)
+        return session_id
+
+    async def list_resumable_sessions(self, *, chat_id: int, workspace: Path | None = None):
+        del chat_id
+        if not self.list_supported:
+            return None
+        if workspace is None:
+            return self.items
+        return tuple(item for item in self.items if item.workspace == workspace)
+
+    async def prompt(self, *, chat_id: int, text: str, images=(), files=()):
+        del chat_id, text, images, files
+        return AgentReply(text="ok")
+
+    def get_workspace(self, *, chat_id: int):
+        del chat_id
+
+    def supports_session_loading(self, *, chat_id: int):
+        del chat_id
+        return True
+
+    async def cancel(self, *, chat_id: int) -> bool:
+        del chat_id
+        return False
+
+    async def stop(self, *, chat_id: int) -> bool:
+        del chat_id
+        return False
+
+    async def clear(self, *, chat_id: int) -> bool:
+        del chat_id
+        return False
+
+    def get_permission_policy(self, *, chat_id: int):
+        del chat_id
+
+    async def set_session_permission_mode(self, *, chat_id: int, mode):
+        del chat_id, mode
+        return False
+
+    async def set_next_prompt_auto_approve(self, *, chat_id: int, enabled: bool):
+        del chat_id, enabled
+        return False
+
+
 def make_update(  # noqa: PLR0913
     *,
     user_id: int = 1,
@@ -302,6 +376,7 @@ async def test_denied_paths_for_other_handlers():
 
     await bridge.help(update, context)
     await bridge.new_session(update, make_context(args=["/tmp"]))
+    await bridge.resume_session(update, make_context(args=["/tmp"]))
     await bridge.session(update, context)
     await bridge.cancel(update, context)
     await bridge.stop(update, context)
@@ -310,6 +385,7 @@ async def test_denied_paths_for_other_handlers():
 
     assert update.message is not None
     assert update.message.replies == [
+        "Access denied for this bot.",
         "Access denied for this bot.",
         "Access denied for this bot.",
         "Access denied for this bot.",
@@ -332,6 +408,105 @@ async def test_new_session_and_session_command():
     assert update.message.replies[0] == "No active session. Use /new first."
     assert "Session started:" in update.message.replies[1]
     assert "Active session workspace:" in update.message.replies[2]
+
+
+async def test_resume_session_without_app_loads_first_candidate():
+    service = ResumeService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=cast(AgentService, service),
+    )
+    update = make_update()
+
+    await bridge.resume_session(update, make_context())
+
+    assert service.loaded is not None
+    assert service.loaded[1] == "s-resume-1"
+    assert update.message is not None
+    assert "Session resumed:" in update.message.replies[0]
+
+
+async def test_resume_session_with_app_sends_picker_message():
+    service = ResumeService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=cast(AgentService, service),
+    )
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+    update = make_update(chat_id=TEST_CHAT_ID)
+
+    await bridge.resume_session(update, make_context())
+
+    assert bot.sent_messages
+    payload = bot.sent_messages[-1]
+    assert payload["chat_id"] == TEST_CHAT_ID
+    assert "Pick a session to resume" in cast(str, payload["text"])
+    assert payload["reply_markup"] is not None
+
+
+async def test_resume_session_with_workspace_arg_includes_workspace_in_message(tmp_path: Path):
+    service = ResumeService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace=str(tmp_path)),
+        agent_service=cast(AgentService, service),
+    )
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+    update = make_update(chat_id=TEST_CHAT_ID)
+
+    await bridge.resume_session(update, make_context(args=["/tmp/ws2"]))
+
+    assert bot.sent_messages
+    payload = bot.sent_messages[-1]
+    assert "Pick a session to resume in" in cast(str, payload["text"])
+
+
+async def test_resume_session_reports_list_not_supported():
+    service = ResumeService()
+    service.list_supported = False
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=cast(AgentService, service),
+    )
+    update = make_update()
+
+    await bridge.resume_session(update, make_context())
+
+    assert update.message is not None
+    assert update.message.replies == ["Agent does not support ACP `session/list`."]
+
+
+async def test_resume_session_reports_empty_results():
+    service = ResumeService()
+    service.items = ()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=cast(AgentService, service),
+    )
+    update = make_update()
+
+    await bridge.resume_session(update, make_context())
+
+    assert update.message is not None
+    assert update.message.replies == ["No resumable sessions found."]
+
+
+async def test_resume_session_reports_list_error():
+    class FailingListResumeService(ResumeService):
+        async def list_resumable_sessions(self, *, chat_id: int, workspace: Path | None = None):
+            del chat_id, workspace
+            raise RuntimeError("list boom")
+
+    service = FailingListResumeService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=cast(AgentService, service),
+    )
+    update = make_update()
+    await bridge.resume_session(update, make_context())
+    assert update.message is not None
+    assert "Failed to list resumable sessions: list boom" in update.message.replies[-1]
 
 
 async def test_new_session_autocreates_relative_workspace_and_reports_it(tmp_path: Path):
@@ -798,6 +973,20 @@ async def test_on_activity_event_markdown_fallback():
     assert "parse_mode" not in failing_bot.sent_messages[-1]
 
 
+async def test_resume_keyboard_limits_to_ten_entries():
+    candidates = tuple(
+        ResumableSession(
+            session_id=f"s-{index}",
+            workspace=Path("/tmp/ws"),
+            title=f"title {index}",
+            updated_at="2026-03-02T12:00:00Z",
+        )
+        for index in range(12)
+    )
+    keyboard = TelegramBridge._resume_keyboard(candidates=candidates)
+    assert len(keyboard.inline_keyboard) == 10
+
+
 async def test_format_activity_block_read_escapes_markdown_and_removes_read_prefix():
     block = AgentActivityBlock(
         kind="read", title="Read test_telegram_bot.py", status="completed", text="Read test_telegram_bot.py"
@@ -1117,6 +1306,176 @@ async def test_on_permission_callback_handles_unexpected_exception():
 
     await bridge.on_permission_callback(update, make_context())
     assert callback.answers[-1] == "Permission action failed."
+
+
+async def test_on_resume_callback_invalid_cases():
+    bridge = make_bridge()
+    update_no_query = cast(
+        Update,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=TEST_CHAT_ID),
+            callback_query=None,
+            message=None,
+        ),
+    )
+    await bridge.on_resume_callback(update_no_query, make_context())
+
+    callback_invalid = DummyCallbackQuery("resume")
+    update_invalid = cast(
+        Update,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=TEST_CHAT_ID),
+            callback_query=callback_invalid,
+            message=None,
+        ),
+    )
+    await bridge.on_resume_callback(update_invalid, make_context())
+    assert callback_invalid.answers[-1] == "Invalid selection."
+
+    callback_non_digit = DummyCallbackQuery("resume|x")
+    update_non_digit = cast(
+        Update,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=TEST_CHAT_ID),
+            callback_query=callback_non_digit,
+            message=None,
+        ),
+    )
+    await bridge.on_resume_callback(update_non_digit, make_context())
+    assert callback_non_digit.answers[-1] == "Invalid selection."
+
+
+async def test_on_resume_callback_selection_expired_and_missing_chat():
+    bridge = make_bridge()
+
+    callback_expired = DummyCallbackQuery("resume|0")
+    update_expired = cast(
+        Update,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=TEST_CHAT_ID),
+            callback_query=callback_expired,
+            message=None,
+        ),
+    )
+    await bridge.on_resume_callback(update_expired, make_context())
+    assert callback_expired.answers[-1] == "Selection expired."
+
+    callback_missing_chat = DummyCallbackQuery("resume|0")
+    callback_missing_chat.message = None
+    update_missing_chat = cast(
+        Update,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=None,
+            callback_query=callback_missing_chat,
+            message=None,
+        ),
+    )
+    await bridge.on_resume_callback(update_missing_chat, make_context())
+    assert callback_missing_chat.answers[-1] == "Missing chat."
+
+
+async def test_on_resume_callback_access_denied_and_invalid_index():
+    service = ResumeService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[999], workspace="."),
+        agent_service=cast(AgentService, service),
+    )
+    callback_denied = DummyCallbackQuery("resume|0")
+    update_denied = cast(
+        Update,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=TEST_CHAT_ID),
+            callback_query=callback_denied,
+            message=None,
+        ),
+    )
+    await bridge.on_resume_callback(update_denied, make_context())
+    assert callback_denied.answers[-1] == "Access denied."
+
+    bridge_ok = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=cast(AgentService, service),
+    )
+    bridge_ok._pending_resume_choices_by_chat[TEST_CHAT_ID] = service.items
+    callback_invalid_index = DummyCallbackQuery("resume|99")
+    update_invalid_index = cast(
+        Update,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=TEST_CHAT_ID),
+            callback_query=callback_invalid_index,
+            message=None,
+        ),
+    )
+    await bridge_ok.on_resume_callback(update_invalid_index, make_context())
+    assert callback_invalid_index.answers[-1] == "Invalid selection."
+
+
+async def test_on_resume_callback_success_and_failure_paths():
+    service = ResumeService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=cast(AgentService, service),
+    )
+    candidates = service.items
+    bridge._pending_resume_choices_by_chat[TEST_CHAT_ID] = candidates
+    callback = DummyCallbackQuery("resume|1")
+    update = cast(
+        Update,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=TEST_CHAT_ID),
+            callback_query=callback,
+            message=DummyMessage("trigger"),
+        ),
+    )
+    await bridge.on_resume_callback(update, make_context())
+    assert callback.answers[-1] == "Session resumed."
+    assert callback.reply_markup_cleared
+    assert TEST_CHAT_ID not in bridge._pending_resume_choices_by_chat
+
+    service.fail_load = True
+    bridge._pending_resume_choices_by_chat[TEST_CHAT_ID] = candidates
+    callback_fail = DummyCallbackQuery("resume|0")
+    update_fail = cast(
+        Update,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=TEST_CHAT_ID),
+            callback_query=callback_fail,
+            message=DummyMessage("trigger"),
+        ),
+    )
+    await bridge.on_resume_callback(update_fail, make_context())
+    assert callback_fail.answers[-1] == "Failed to resume."
+    assert TEST_CHAT_ID in bridge._pending_resume_choices_by_chat
+
+
+async def test_on_resume_callback_uses_query_message_chat_when_effective_chat_missing():
+    service = ResumeService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=cast(AgentService, service),
+    )
+    bridge._pending_resume_choices_by_chat[TEST_CHAT_ID] = service.items
+    callback = DummyCallbackQuery("resume|0")
+    update = cast(
+        Update,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=None,
+            callback_query=callback,
+            message=DummyMessage("trigger"),
+        ),
+    )
+    await bridge.on_resume_callback(update, make_context())
+    assert callback.answers[-1] == "Session resumed."
 
 
 async def test_cancel_stop_clear_without_session():

@@ -11,6 +11,7 @@ from urllib.parse import quote
 import pytest
 from acp import RequestError, text_block
 from acp.schema import (
+    AgentCapabilities,
     AgentMessageChunk,
     AllowedOutcome,
     AudioContentBlock,
@@ -21,6 +22,9 @@ from acp.schema import (
     PermissionOption,
     RequestPermissionResponse,
     ResourceContentBlock,
+    SessionCapabilities,
+    SessionInfo,
+    SessionListCapabilities,
     TextResourceContents,
     ToolCall,
     ToolCallProgress,
@@ -77,21 +81,50 @@ class FakeProcess:
 
 
 class FakeConnection:
-    def __init__(self, *, session_id: str = "acp-session") -> None:
+    def __init__(
+        self,
+        *,
+        session_id: str = "acp-session",
+        supports_load_session: bool = True,
+        supports_session_list: bool = True,
+        listed_sessions: list[SessionInfo] | None = None,
+    ) -> None:
         self.client: _AcpClient | None = None
         self.initialized = False
         self.cwd: str | None = None
         self.prompt_calls: list[str] = []
+        self.list_calls: list[tuple[str | None, str | None]] = []
+        self._supports_load_session = supports_load_session
+        self._supports_session_list = supports_session_list
+        self._listed_sessions = listed_sessions or []
         self._session_id = session_id
 
     async def initialize(self, **kwargs):
         self.initialized = True
         assert kwargs["protocol_version"] == 1
+        session_capabilities = (
+            SessionCapabilities(list=SessionListCapabilities()) if self._supports_session_list else None
+        )
+        return SimpleNamespace(
+            agent_capabilities=AgentCapabilities(
+                load_session=self._supports_load_session,
+                session_capabilities=session_capabilities,
+            )
+        )
 
     async def new_session(self, *, cwd: str, mcp_servers: list) -> SimpleNamespace:
         self.cwd = cwd
         assert mcp_servers == []
         return SimpleNamespace(session_id=self._session_id)
+
+    async def load_session(self, *, cwd: str, session_id: str, mcp_servers: list) -> SimpleNamespace:
+        self.cwd = cwd
+        assert mcp_servers == []
+        return SimpleNamespace(config_options=[], models=[], modes=[])
+
+    async def list_sessions(self, *, cursor: str | None = None, cwd: str | None = None) -> SimpleNamespace:
+        self.list_calls.append((cursor, cwd))
+        return SimpleNamespace(next_cursor=None, sessions=self._listed_sessions)
 
     async def prompt(self, *, session_id: str, prompt: list) -> SimpleNamespace:
         self.prompt_calls.append(session_id)
@@ -141,6 +174,25 @@ class HangingInitializeConnection(FakeConnection):
     async def initialize(self, **kwargs):
         del kwargs
         await asyncio.sleep(10)
+
+
+class HangingNewSessionConnection(FakeConnection):
+    async def new_session(self, *, cwd: str, mcp_servers: list) -> SimpleNamespace:
+        del cwd, mcp_servers
+        await asyncio.sleep(10)
+
+
+class HangingLoadSessionConnection(FakeConnection):
+    async def load_session(self, *, cwd: str, session_id: str, mcp_servers: list) -> SimpleNamespace:
+        del cwd, session_id, mcp_servers
+        await asyncio.sleep(10)
+
+
+class NoSessionCapabilitiesConnection(FakeConnection):
+    async def initialize(self, **kwargs):
+        self.initialized = True
+        assert kwargs["protocol_version"] == 1
+        return SimpleNamespace(agent_capabilities=AgentCapabilities(load_session=True, session_capabilities=None))
 
 
 async def test_acp_client_capture_text_and_media_markers():
@@ -579,6 +631,31 @@ async def test_new_session_times_out_when_agent_does_not_handshake(tmp_path: Pat
     assert process.terminated
 
 
+async def test_new_session_times_out_during_session_new(tmp_path: Path):
+    process = FakeProcess()
+    connection = HangingNewSessionConnection(session_id="never")
+
+    async def fake_spawn(program: str, *args: str, **kwargs):
+        del program, args, kwargs
+        return process
+
+    def fake_connect(client, input_stream, output_stream):
+        del client, input_stream, output_stream
+        return connection
+
+    service = AcpAgentService(
+        SessionRegistry(),
+        program="agent",
+        args=[],
+        connect_timeout=0.01,
+        spawner=fake_spawn,
+        connector=fake_connect,
+    )
+    with pytest.raises(RuntimeError, match="Timed out waiting for ACP agent handshake"):
+        await service.new_session(chat_id=1, workspace=tmp_path)
+    assert process.terminated
+
+
 async def test_new_session_and_prompt(tmp_path: Path):
     process = FakeProcess()
     connection = FakeConnection(session_id="real-session")
@@ -611,6 +688,256 @@ async def test_new_session_and_prompt(tmp_path: Path):
     assert reply is not None
     assert reply.text == "hello from acp"
     assert connection.prompt_calls == ["real-session"]
+
+
+async def test_load_session_and_supports_session_loading(tmp_path: Path):
+    process = FakeProcess()
+    connection = FakeConnection(session_id="real-session", supports_load_session=True)
+
+    async def fake_spawn(program: str, *args: str, **kwargs):
+        del program, args, kwargs
+        return process
+
+    def fake_connect(client, input_stream, output_stream):
+        del input_stream, output_stream
+        connection.client = client
+        return connection
+
+    service = AcpAgentService(
+        SessionRegistry(),
+        program="agent",
+        args=[],
+        spawner=fake_spawn,
+        connector=fake_connect,
+    )
+    loaded_id = await service.load_session(chat_id=2, session_id="loaded-session", workspace=tmp_path)
+    assert loaded_id == "loaded-session"
+    assert connection.cwd == str(tmp_path.resolve())
+    assert service.get_workspace(chat_id=2) == tmp_path.resolve()
+    assert service.supports_session_loading(chat_id=2) is True
+
+
+async def test_load_session_rejects_when_capability_is_false(tmp_path: Path):
+    process = FakeProcess()
+    connection = FakeConnection(supports_load_session=False)
+
+    async def fake_spawn(program: str, *args: str, **kwargs):
+        del program, args, kwargs
+        return process
+
+    def fake_connect(client, input_stream, output_stream):
+        del client, input_stream, output_stream
+        return connection
+
+    service = AcpAgentService(
+        SessionRegistry(),
+        program="agent",
+        args=[],
+        spawner=fake_spawn,
+        connector=fake_connect,
+    )
+    with pytest.raises(RuntimeError, match="does not support `session/load`"):
+        await service.load_session(chat_id=1, session_id="x", workspace=tmp_path)
+
+
+async def test_load_session_rejects_file_workspace(tmp_path: Path):
+    service = AcpAgentService(SessionRegistry(), program="agent", args=[])
+    invalid = tmp_path / "not-a-dir"
+    invalid.write_text("x")
+    with pytest.raises(ValueError):
+        await service.load_session(chat_id=1, session_id="x", workspace=invalid)
+
+
+async def test_load_session_replaces_existing_and_shuts_down(tmp_path: Path):
+    first = FakeProcess()
+    second = FakeProcess()
+    calls: list[FakeProcess] = []
+
+    async def fake_spawn(program: str, *args: str, **kwargs):
+        del program, args, kwargs
+        process = first if not calls else second
+        calls.append(process)
+        return process
+
+    def fake_connect(client, input_stream, output_stream):
+        del input_stream, output_stream
+        connection = FakeConnection(supports_load_session=True)
+        connection.client = client
+        return connection
+
+    service = AcpAgentService(SessionRegistry(), program="agent", args=[], spawner=fake_spawn, connector=fake_connect)
+    await service.new_session(chat_id=3, workspace=tmp_path)
+    await service.load_session(chat_id=3, session_id="reloaded", workspace=tmp_path)
+    assert first.terminated
+
+
+async def test_load_session_times_out(tmp_path: Path):
+    process = FakeProcess()
+    connection = HangingLoadSessionConnection(supports_load_session=True)
+
+    async def fake_spawn(program: str, *args: str, **kwargs):
+        del program, args, kwargs
+        return process
+
+    def fake_connect(client, input_stream, output_stream):
+        del client, input_stream, output_stream
+        return connection
+
+    service = AcpAgentService(
+        SessionRegistry(),
+        program="agent",
+        args=[],
+        connect_timeout=0.01,
+        spawner=fake_spawn,
+        connector=fake_connect,
+    )
+    with pytest.raises(RuntimeError, match="Timed out waiting for ACP agent handshake"):
+        await service.load_session(chat_id=1, session_id="x", workspace=tmp_path)
+    assert process.terminated
+
+
+async def test_list_resumable_sessions_supported_and_filtered(tmp_path: Path):
+    workspace = tmp_path / "w"
+    workspace.mkdir()
+    listed = [
+        SessionInfo(
+            session_id="s1",
+            cwd=str(workspace),
+            title="session one",
+            updated_at="2026-03-02T12:00:00Z",
+        ),
+        SessionInfo(
+            session_id="s2",
+            cwd=str(tmp_path / "other"),
+            title="other",
+            updated_at="2026-03-01T12:00:00Z",
+        ),
+    ]
+    process = FakeProcess()
+    connection = FakeConnection(listed_sessions=listed, supports_session_list=True)
+
+    async def fake_spawn(program: str, *args: str, **kwargs):
+        del program, args, kwargs
+        return process
+
+    def fake_connect(client, input_stream, output_stream):
+        del client, input_stream, output_stream
+        return connection
+
+    service = AcpAgentService(
+        SessionRegistry(),
+        program="agent",
+        args=[],
+        spawner=fake_spawn,
+        connector=fake_connect,
+    )
+    sessions = await service.list_resumable_sessions(chat_id=1, workspace=workspace)
+    assert sessions is not None
+    assert [item.session_id for item in sessions] == ["s1"]
+    assert connection.list_calls
+
+
+async def test_list_resumable_sessions_returns_none_when_not_supported(tmp_path: Path):
+    process = FakeProcess()
+    connection = FakeConnection(supports_session_list=False)
+
+    async def fake_spawn(program: str, *args: str, **kwargs):
+        del program, args, kwargs
+        return process
+
+    def fake_connect(client, input_stream, output_stream):
+        del client, input_stream, output_stream
+        return connection
+
+    service = AcpAgentService(
+        SessionRegistry(),
+        program="agent",
+        args=[],
+        spawner=fake_spawn,
+        connector=fake_connect,
+    )
+    assert await service.list_resumable_sessions(chat_id=1, workspace=tmp_path) is None
+    assert service.supports_session_loading(chat_id=1) is None
+
+
+async def test_list_resumable_sessions_live_without_list_support_returns_none(tmp_path: Path):
+    process = FakeProcess()
+    connection = FakeConnection(supports_session_list=False)
+
+    async def fake_spawn(program: str, *args: str, **kwargs):
+        del program, args, kwargs
+        return process
+
+    def fake_connect(client, input_stream, output_stream):
+        del input_stream, output_stream
+        connection.client = client
+        return connection
+
+    service = AcpAgentService(
+        SessionRegistry(),
+        program="agent",
+        args=[],
+        spawner=fake_spawn,
+        connector=fake_connect,
+    )
+    await service.new_session(chat_id=8, workspace=tmp_path)
+    assert await service.list_resumable_sessions(chat_id=8, workspace=tmp_path) is None
+
+
+async def test_list_resumable_sessions_uses_live_connection_branch(tmp_path: Path):
+    listed = [
+        SessionInfo(
+            session_id="s-live",
+            cwd=str(tmp_path),
+            title="live",
+            updated_at="2026-03-02T14:00:00Z",
+        )
+    ]
+    process = FakeProcess()
+    connection = FakeConnection(listed_sessions=listed, supports_session_list=True)
+
+    async def fake_spawn(program: str, *args: str, **kwargs):
+        del program, args, kwargs
+        return process
+
+    def fake_connect(client, input_stream, output_stream):
+        del input_stream, output_stream
+        connection.client = client
+        return connection
+
+    service = AcpAgentService(
+        SessionRegistry(),
+        program="agent",
+        args=[],
+        spawner=fake_spawn,
+        connector=fake_connect,
+    )
+    await service.new_session(chat_id=7, workspace=tmp_path)
+    sessions = await service.list_resumable_sessions(chat_id=7, workspace=tmp_path)
+    assert sessions is not None
+    assert sessions[0].session_id == "s-live"
+
+
+async def test_list_resumable_sessions_returns_none_when_session_capabilities_missing(tmp_path: Path):
+    process = FakeProcess()
+    connection = NoSessionCapabilitiesConnection()
+
+    async def fake_spawn(program: str, *args: str, **kwargs):
+        del program, args, kwargs
+        return process
+
+    def fake_connect(client, input_stream, output_stream):
+        del client, input_stream, output_stream
+        return connection
+
+    service = AcpAgentService(
+        SessionRegistry(),
+        program="agent",
+        args=[],
+        spawner=fake_spawn,
+        connector=fake_connect,
+    )
+    assert await service.list_resumable_sessions(chat_id=1, workspace=tmp_path) is None
 
 
 async def test_prompt_without_active_session_returns_none():

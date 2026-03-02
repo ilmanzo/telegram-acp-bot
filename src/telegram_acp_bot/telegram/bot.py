@@ -25,10 +25,13 @@ from telegram_acp_bot.acp_app.models import (
     PermissionRequest,
     PromptFile,
     PromptImage,
+    ResumableSession,
 )
 
 PERMISSION_CALLBACK_PREFIX = "perm"
+RESUME_CALLBACK_PREFIX = "resume"
 PERMISSION_CALLBACK_PARTS = 3
+RESUME_CALLBACK_PARTS = 2
 RESTART_EXIT_CODE = 75
 logger = logging.getLogger(__name__)
 KIND_LABELS = {
@@ -59,6 +62,15 @@ class AgentService(Protocol):
 
     async def new_session(self, *, chat_id: int, workspace: Path) -> str: ...
 
+    async def load_session(self, *, chat_id: int, session_id: str, workspace: Path) -> str: ...
+
+    async def list_resumable_sessions(
+        self,
+        *,
+        chat_id: int,
+        workspace: Path | None = None,
+    ) -> tuple[ResumableSession, ...] | None: ...
+
     async def prompt(
         self,
         *,
@@ -69,6 +81,8 @@ class AgentService(Protocol):
     ) -> AgentReply | None: ...
 
     def get_workspace(self, *, chat_id: int) -> Path | None: ...
+
+    def supports_session_loading(self, *, chat_id: int) -> bool | None: ...
 
     async def cancel(self, *, chat_id: int) -> bool: ...
 
@@ -109,6 +123,7 @@ class TelegramBridge:
         self._agent_service = agent_service
         self._app: Application | None = None
         self._restart_requested = False
+        self._pending_resume_choices_by_chat: dict[int, tuple[ResumableSession, ...]] = {}
         if hasattr(self._agent_service, "set_permission_request_handler"):
             self._agent_service.set_permission_request_handler(self.on_permission_request)
         if hasattr(self._agent_service, "set_activity_event_handler"):
@@ -119,12 +134,14 @@ class TelegramBridge:
         app.add_handler(CommandHandler("start", self.start))
         app.add_handler(CommandHandler("help", self.help))
         app.add_handler(CommandHandler("new", self.new_session))
+        app.add_handler(CommandHandler("resume", self.resume_session))
         app.add_handler(CommandHandler("session", self.session))
         app.add_handler(CommandHandler("cancel", self.cancel))
         app.add_handler(CommandHandler("stop", self.stop))
         app.add_handler(CommandHandler("clear", self.clear))
         app.add_handler(CommandHandler("restart", self.restart))
         app.add_handler(CallbackQueryHandler(self.on_permission_callback, pattern=r"^perm\|"))
+        app.add_handler(CallbackQueryHandler(self.on_resume_callback, pattern=r"^resume\|"))
         app.add_handler(
             MessageHandler((filters.TEXT | filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, self.on_message)
         )
@@ -133,7 +150,7 @@ class TelegramBridge:
         del context
         if not await self._require_access(update):
             return
-        await self._reply(update, "Use /new [workspace] to start a session, then send plain text prompts.")
+        await self._reply(update, "Use /new [workspace] or /resume [workspace] to start a session.")
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -141,7 +158,7 @@ class TelegramBridge:
             return
         await self._reply(
             update,
-            "Commands: /new [workspace], /session, /cancel, /stop, /clear, /restart, /help",
+            "Commands: /new [workspace], /resume [workspace], /session, /cancel, /stop, /clear, /restart, /help",
         )
 
     async def new_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -168,6 +185,47 @@ class TelegramBridge:
         if workspace_was_missing:
             response = f"{response}\nCreated workspace: `{active_workspace}`"
         await self._reply(update, response)
+
+    async def resume_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._require_access(update):
+            return
+
+        chat_id = self._chat_id(update)
+        args = self._context_args(context)
+        workspace = self._workspace_from_args(args) if args else None
+        try:
+            candidates = await self._agent_service.list_resumable_sessions(chat_id=chat_id, workspace=workspace)
+        except Exception as exc:  # noqa: BLE001
+            await self._reply(update, f"Failed to list resumable sessions: {exc}")
+            return
+        if candidates is None:
+            await self._reply(update, "Agent does not support ACP `session/list`.")
+            return
+        if not candidates:
+            await self._reply(update, "No resumable sessions found.")
+            return
+
+        if self._app is None:
+            candidate = candidates[0]
+            session_id = await self._agent_service.load_session(
+                chat_id=chat_id,
+                session_id=candidate.session_id,
+                workspace=candidate.workspace,
+            )
+            await self._reply(update, f"Session resumed: `{session_id}` in `{candidate.workspace}`")
+            return
+
+        self._pending_resume_choices_by_chat[chat_id] = candidates
+        keyboard = self._resume_keyboard(candidates=candidates)
+        message = "Pick a session to resume:"
+        if workspace is not None:
+            message = f"Pick a session to resume in `{workspace}`:"
+        await self._app.bot.send_message(
+            chat_id=chat_id,
+            text=message,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN,
+        )
 
     async def session(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -303,6 +361,63 @@ class TelegramBridge:
             logger.exception("Unhandled error while processing permission callback")
             await query.answer("Permission action failed.")
 
+    async def on_resume_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        query = update.callback_query
+        if query is None:
+            return
+        if not await self._require_access(update):
+            await query.answer("Access denied.")
+            return
+        data = query.data or ""
+        parts = data.split("|", maxsplit=1)
+        if len(parts) != RESUME_CALLBACK_PARTS:
+            await query.answer("Invalid selection.")
+            return
+        _, raw_index = parts
+        if not raw_index.isdigit():
+            await query.answer("Invalid selection.")
+            return
+        chat = update.effective_chat
+        chat_id = chat.id if chat is not None else None
+        if chat_id is None:
+            query_message = getattr(query, "message", None)
+            if query_message is not None:
+                chat_id = query_message.chat.id
+        if chat_id is None:
+            await query.answer("Missing chat.")
+            return
+        candidates = self._pending_resume_choices_by_chat.get(chat_id)
+        if candidates is None:
+            await query.answer("Selection expired.")
+            return
+        index = int(raw_index)
+        if index < 0 or index >= len(candidates):
+            await query.answer("Invalid selection.")
+            return
+        candidate = candidates[index]
+        try:
+            session_id = await self._agent_service.load_session(
+                chat_id=chat_id,
+                session_id=candidate.session_id,
+                workspace=candidate.workspace,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Resume failed for chat_id=%s session_id=%s workspace=%s",
+                chat_id,
+                candidate.session_id,
+                candidate.workspace,
+            )
+            await query.answer("Failed to resume.")
+            await self._reply(update, f"Failed to resume session `{candidate.session_id}`: {exc}")
+            return
+
+        await query.answer("Session resumed.")
+        await query.edit_message_reply_markup(reply_markup=None)
+        self._pending_resume_choices_by_chat.pop(chat_id, None)
+        await self._reply(update, f"Session resumed: `{session_id}` in `{candidate.workspace}`")
+
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._require_access(update):
             return
@@ -402,6 +517,16 @@ class TelegramBridge:
             callback_data = f"{PERMISSION_CALLBACK_PREFIX}|{request.request_id}|{action}"
             buttons.append(InlineKeyboardButton(text=label, callback_data=callback_data))
         rows.append(buttons)
+        return InlineKeyboardMarkup(rows)
+
+    @staticmethod
+    def _resume_keyboard(*, candidates: tuple[ResumableSession, ...]) -> InlineKeyboardMarkup:
+        rows: list[list[InlineKeyboardButton]] = []
+        for index, candidate in enumerate(candidates[:10]):
+            title = candidate.title.strip() or candidate.session_id
+            label = title[:48]
+            callback_data = f"{RESUME_CALLBACK_PREFIX}|{index}"
+            rows.append([InlineKeyboardButton(text=label, callback_data=callback_data)])
         return InlineKeyboardMarkup(rows)
 
     async def _require_access(self, update: Update) -> bool:

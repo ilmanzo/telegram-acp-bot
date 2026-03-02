@@ -37,6 +37,36 @@ async def test_get_workspace(tmp_path: Path) -> None:
     assert service.get_workspace(chat_id=1) == workspace
 
 
+async def test_echo_service_supports_session_loading_and_loads_session(tmp_path: Path) -> None:
+    service = EchoAgentService(SessionRegistry())
+    workspace = tmp_path / "echo-load"
+
+    loaded_id = await service.load_session(chat_id=1, session_id="external-session", workspace=workspace)
+    assert isinstance(loaded_id, str)
+    assert service.supports_session_loading(chat_id=1) is True
+    assert service.get_workspace(chat_id=1) == workspace
+
+
+async def test_echo_service_list_resumable_sessions(tmp_path: Path) -> None:
+    service = EchoAgentService(SessionRegistry())
+    workspace = tmp_path / "echo-list"
+    await service.new_session(chat_id=1, workspace=workspace)
+
+    listed = await service.list_resumable_sessions(chat_id=1, workspace=workspace)
+    assert listed is not None
+    assert len(listed) == 1
+    assert listed[0].workspace == workspace
+
+    other = await service.list_resumable_sessions(chat_id=1, workspace=tmp_path / "other")
+    assert other == ()
+
+
+async def test_echo_service_list_resumable_sessions_without_active_session() -> None:
+    service = EchoAgentService(SessionRegistry())
+    listed = await service.list_resumable_sessions(chat_id=999)
+    assert listed == ()
+
+
 async def test_permission_policy_updates_without_session() -> None:
     service = EchoAgentService(SessionRegistry())
     assert await service.set_session_permission_mode(chat_id=1, mode="approve") is False

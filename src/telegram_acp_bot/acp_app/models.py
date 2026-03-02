@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 PermissionMode = Literal["deny", "approve", "ask"]
@@ -82,6 +83,16 @@ class PermissionRequest:
     tool_title: str
     tool_call_id: str
     available_actions: tuple[PermissionDecisionAction, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class ResumableSession:
+    """Session candidate returned by ACP session listing."""
+
+    session_id: str
+    workspace: Path
+    title: str
+    updated_at: str
 
 
 class AgentOutputLimitExceededError(RuntimeError):
