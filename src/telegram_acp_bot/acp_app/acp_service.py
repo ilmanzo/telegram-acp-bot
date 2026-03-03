@@ -15,6 +15,7 @@ from uuid import uuid4
 from acp import PROTOCOL_VERSION, RequestError, connect_to_agent, text_block
 from acp.core import ClientSideConnection
 from acp.schema import (
+    AgentCapabilities,
     AgentMessageChunk,
     AllowedOutcome,
     AudioContentBlock,
@@ -32,6 +33,7 @@ from acp.schema import (
     ReleaseTerminalResponse,
     RequestPermissionResponse,
     ResourceContentBlock,
+    SessionInfo,
     TerminalOutputResponse,
     TextContentBlock,
     TextResourceContents,
@@ -55,6 +57,7 @@ from telegram_acp_bot.acp_app.models import (
     PermissionRequest,
     PromptFile,
     PromptImage,
+    ResumableSession,
     ToolCallStatus,
 )
 from telegram_acp_bot.core.session_registry import SessionRegistry
@@ -94,6 +97,13 @@ class AcpHandshakeTimeoutError(RuntimeError):
         super().__init__(f"Timed out waiting for ACP agent handshake after {timeout_seconds:.1f}s.")
 
 
+class SessionLoadNotSupportedError(RuntimeError):
+    """Raised when the ACP agent does not implement `session/load`."""
+
+    def __init__(self) -> None:
+        super().__init__("ACP agent does not support `session/load`.")
+
+
 @dataclass(slots=True)
 class _LiveSession:
     acp_session_id: str
@@ -101,6 +111,8 @@ class _LiveSession:
     process: ProcessLike
     connection: ClientSideConnection
     client: _AcpClient
+    supports_load_session: bool = False
+    supports_session_list: bool = False
     permission_mode: PermissionMode = "deny"
     next_prompt_auto_approve: bool = False
     active_prompt_auto_approve: bool = False
@@ -417,33 +429,8 @@ class AcpAgentService:
         if existing is not None:
             await self._shutdown(existing.process)
 
-        process = await self._spawner(
-            self._program,
-            *self._args,
-            stdin=aio_subprocess.PIPE,
-            stdout=aio_subprocess.PIPE,
-            limit=self._stdio_limit,
-        )
-        logger.debug("Spawned ACP process for chat_id=%s pid=%s", chat_id, getattr(process, "pid", "unknown"))
-        if process.stdin is None or process.stdout is None:
-            raise RuntimeError
-
-        client = _AcpClient(
-            permission_decider=self._decide_permission,
-            event_reporter=self._report_permission_event,
-            activity_reporter=self._forward_activity_event,
-        )
-        connection = self._connector(client, process.stdin, process.stdout)
+        process, connection, client, capabilities = await self._start_initialized_connection(chat_id=chat_id)
         try:
-            logger.debug("Initializing ACP connection for chat_id=%s", chat_id)
-            await asyncio.wait_for(
-                connection.initialize(
-                    protocol_version=PROTOCOL_VERSION,
-                    client_capabilities=ClientCapabilities(),
-                    client_info=Implementation(name="telegram-acp-bot", title="Telegram ACP Bot", version="0.1.0"),
-                ),
-                timeout=self._connect_timeout,
-            )
             logger.debug("Requesting ACP new_session for chat_id=%s", chat_id)
             session = await asyncio.wait_for(
                 connection.new_session(cwd=str(workspace), mcp_servers=[]),
@@ -460,10 +447,73 @@ class AcpAgentService:
             process=process,
             connection=connection,
             client=client,
+            supports_load_session=self._supports_load_session(capabilities),
+            supports_session_list=self._supports_session_list(capabilities),
             permission_mode=self._default_permission_mode,
         )
         logger.info("ACP session started for chat_id=%s session_id=%s", chat_id, session.session_id)
         return session.session_id
+
+    async def load_session(self, *, chat_id: int, session_id: str, workspace: Path) -> str:
+        workspace = self._normalize_workspace(workspace)
+        if workspace.exists() and not workspace.is_dir():
+            raise ValueError(workspace)
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        existing = self._live_by_chat.pop(chat_id, None)
+        if existing is not None:
+            await self._shutdown(existing.process)
+
+        process, connection, client, capabilities = await self._start_initialized_connection(chat_id=chat_id)
+        if not self._supports_load_session(capabilities):
+            await self._shutdown(process)
+            raise SessionLoadNotSupportedError()
+        try:
+            await asyncio.wait_for(
+                connection.load_session(cwd=str(workspace), session_id=session_id, mcp_servers=[]),
+                timeout=self._connect_timeout,
+            )
+        except TimeoutError as exc:
+            await self._shutdown(process)
+            raise AcpHandshakeTimeoutError(self._connect_timeout) from exc
+
+        self._registry.create_or_replace(chat_id=chat_id, workspace=workspace, session_id=session_id)
+        self._live_by_chat[chat_id] = _LiveSession(
+            acp_session_id=session_id,
+            workspace=workspace,
+            process=process,
+            connection=connection,
+            client=client,
+            supports_load_session=self._supports_load_session(capabilities),
+            supports_session_list=self._supports_session_list(capabilities),
+            permission_mode=self._default_permission_mode,
+        )
+        logger.info("ACP session loaded for chat_id=%s session_id=%s", chat_id, session_id)
+        return session_id
+
+    async def list_resumable_sessions(
+        self,
+        *,
+        chat_id: int,
+        workspace: Path | None = None,
+    ) -> tuple[ResumableSession, ...] | None:
+        normalized_workspace = None if workspace is None else self._normalize_workspace(workspace)
+        live = self._live_by_chat.get(chat_id)
+        if live is not None:
+            if not live.supports_session_list:
+                return None
+            return await self._list_sessions_from_connection(
+                connection=live.connection,
+                workspace=normalized_workspace,
+            )
+
+        process, connection, _client, capabilities = await self._start_initialized_connection(chat_id=chat_id)
+        try:
+            if not self._supports_session_list(capabilities):
+                return None
+            return await self._list_sessions_from_connection(connection=connection, workspace=normalized_workspace)
+        finally:
+            await self._shutdown(process)
 
     async def prompt(
         self,
@@ -514,6 +564,12 @@ class AcpAgentService:
     def get_workspace(self, *, chat_id: int) -> Path | None:
         session = self._registry.get(chat_id)
         return None if session is None else session.workspace
+
+    def supports_session_loading(self, *, chat_id: int) -> bool | None:
+        live = self._live_by_chat.get(chat_id)
+        if live is None:
+            return None
+        return live.supports_load_session
 
     async def cancel(self, *, chat_id: int) -> bool:
         live = self._live_by_chat.get(chat_id)
@@ -616,9 +672,109 @@ class AcpAgentService:
             process.kill()
             await process.wait()
 
+    async def _start_initialized_connection(
+        self,
+        *,
+        chat_id: int,
+    ) -> tuple[ProcessLike, ClientSideConnection, _AcpClient, AgentCapabilities]:
+        process = await self._spawner(
+            self._program,
+            *self._args,
+            stdin=aio_subprocess.PIPE,
+            stdout=aio_subprocess.PIPE,
+            limit=self._stdio_limit,
+        )
+        logger.debug("Spawned ACP process for chat_id=%s pid=%s", chat_id, getattr(process, "pid", "unknown"))
+        if process.stdin is None or process.stdout is None:
+            raise RuntimeError
+
+        client = _AcpClient(
+            permission_decider=self._decide_permission,
+            event_reporter=self._report_permission_event,
+            activity_reporter=self._forward_activity_event,
+        )
+        connection = self._connector(client, process.stdin, process.stdout)
+        try:
+            logger.debug("Initializing ACP connection for chat_id=%s", chat_id)
+            initialized = await asyncio.wait_for(
+                connection.initialize(
+                    protocol_version=PROTOCOL_VERSION,
+                    client_capabilities=ClientCapabilities(),
+                    client_info=Implementation(name="telegram-acp-bot", title="Telegram ACP Bot", version="0.1.0"),
+                ),
+                timeout=self._connect_timeout,
+            )
+        except TimeoutError as exc:
+            await self._shutdown(process)
+            raise AcpHandshakeTimeoutError(self._connect_timeout) from exc
+        capabilities = (
+            initialized.agent_capabilities
+            if initialized is not None and hasattr(initialized, "agent_capabilities")
+            else AgentCapabilities()
+        )
+        return process, connection, client, capabilities
+
+    async def _list_sessions_from_connection(
+        self,
+        *,
+        connection: ClientSideConnection,
+        workspace: Path | None,
+    ) -> tuple[ResumableSession, ...]:
+        cursor: str | None = None
+        sessions: list[SessionInfo] = []
+        for _ in range(5):
+            result = await asyncio.wait_for(
+                connection.list_sessions(cursor=cursor, cwd=None if workspace is None else str(workspace)),
+                timeout=self._connect_timeout,
+            )
+            sessions.extend(result.sessions or [])
+            cursor = result.next_cursor
+            if cursor is None:
+                break
+        normalized_target = self._resolved_workspace_or_none(workspace)
+        mapped: list[ResumableSession] = []
+        for info in sessions:
+            item_workspace = self._workspace_from_session_cwd(info.cwd)
+            if normalized_target is not None and item_workspace != normalized_target:
+                continue
+            mapped.append(
+                ResumableSession(
+                    session_id=info.session_id,
+                    workspace=item_workspace,
+                    title=(info.title or "").strip() or "(untitled session)",
+                    updated_at=info.updated_at or "",
+                )
+            )
+        mapped.sort(key=lambda item: item.updated_at, reverse=True)
+        return tuple(mapped)
+
+    @staticmethod
+    def _supports_load_session(capabilities: AgentCapabilities) -> bool:
+        # Some agents expose capabilities with partial/empty values; treat
+        # explicit False as unsupported and probe otherwise.
+        return capabilities.load_session is not False
+
+    @staticmethod
+    def _supports_session_list(capabilities: AgentCapabilities) -> bool:
+        session_capabilities = capabilities.session_capabilities
+        if session_capabilities is None:
+            return False
+        # Some agents expose `session_capabilities.list` as null/empty metadata
+        # while still implementing `session/list`.
+        return session_capabilities.list is not False
+
     @staticmethod
     def _normalize_workspace(workspace: Path) -> Path:
         return workspace.expanduser().resolve()
+
+    @staticmethod
+    def _resolved_workspace_or_none(workspace: Path | None) -> Path | None:
+        return None if workspace is None else workspace.resolve()
+
+    @staticmethod
+    def _workspace_from_session_cwd(cwd: str | None) -> Path:
+        raw_cwd = cwd or "."
+        return Path(raw_cwd).expanduser().resolve()
 
     async def _decide_permission(
         self,

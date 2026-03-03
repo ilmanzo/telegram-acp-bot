@@ -12,6 +12,7 @@ from telegram_acp_bot.acp_app.models import (
     PermissionRequest,
     PromptFile,
     PromptImage,
+    ResumableSession,
 )
 from telegram_acp_bot.core.session_registry import SessionRegistry
 
@@ -33,6 +34,31 @@ class EchoAgentService:
         self._next_prompt_auto_approve[chat_id] = False
         return session.session_id
 
+    async def load_session(self, *, chat_id: int, session_id: str, workspace: Path) -> str:
+        del session_id
+        return await self.new_session(chat_id=chat_id, workspace=workspace)
+
+    async def list_resumable_sessions(
+        self,
+        *,
+        chat_id: int,
+        workspace: Path | None = None,
+    ) -> tuple[ResumableSession, ...] | None:
+        session = self._registry.get(chat_id)
+        if session is None:
+            return ()
+        normalized_workspace = self._normalize_workspace(workspace)
+        if normalized_workspace is not None and session.workspace != normalized_workspace:
+            return ()
+        return (
+            ResumableSession(
+                session_id=session.session_id,
+                workspace=session.workspace,
+                title="Echo session",
+                updated_at="",
+            ),
+        )
+
     async def prompt(
         self,
         *,
@@ -52,6 +78,10 @@ class EchoAgentService:
     def get_workspace(self, *, chat_id: int) -> Path | None:
         session = self._registry.get(chat_id)
         return None if session is None else session.workspace
+
+    def supports_session_loading(self, *, chat_id: int) -> bool | None:
+        del chat_id
+        return True
 
     async def cancel(self, *, chat_id: int) -> bool:
         return self._registry.get(chat_id) is not None
@@ -116,3 +146,9 @@ class EchoAgentService:
             raise ValueError(resolved)
         resolved.mkdir(parents=True, exist_ok=True)
         return resolved
+
+    @staticmethod
+    def _normalize_workspace(workspace: Path | None) -> Path | None:
+        if workspace is None:
+            return None
+        return workspace.expanduser().resolve()
