@@ -180,12 +180,14 @@ class HangingNewSessionConnection(FakeConnection):
     async def new_session(self, *, cwd: str, mcp_servers: list) -> SimpleNamespace:
         del cwd, mcp_servers
         await asyncio.sleep(10)
+        return SimpleNamespace()
 
 
 class HangingLoadSessionConnection(FakeConnection):
     async def load_session(self, *, cwd: str, session_id: str, mcp_servers: list) -> SimpleNamespace:
         del cwd, session_id, mcp_servers
         await asyncio.sleep(10)
+        return SimpleNamespace()
 
 
 class NoSessionCapabilitiesConnection(FakeConnection):

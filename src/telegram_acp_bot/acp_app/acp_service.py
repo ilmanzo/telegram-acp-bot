@@ -742,7 +742,7 @@ class AcpAgentService:
                     session_id=info.session_id,
                     workspace=item_workspace,
                     title=(info.title or "").strip() or "(untitled session)",
-                    updated_at=info.updated_at,
+                    updated_at=info.updated_at or "",
                 )
             )
         mapped.sort(key=lambda item: item.updated_at, reverse=True)
@@ -772,8 +772,9 @@ class AcpAgentService:
         return None if workspace is None else workspace.resolve()
 
     @staticmethod
-    def _workspace_from_session_cwd(cwd: str) -> Path:
-        return Path(cwd).expanduser().resolve()
+    def _workspace_from_session_cwd(cwd: str | None) -> Path:
+        raw_cwd = cwd or "."
+        return Path(raw_cwd).expanduser().resolve()
 
     async def _decide_permission(
         self,
