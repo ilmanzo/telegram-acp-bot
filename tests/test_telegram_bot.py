@@ -1437,7 +1437,10 @@ async def test_on_resume_callback_success_and_failure_paths():
     )
     await bridge.on_resume_callback(update, make_context())
     assert callback.answers[-1] == "Session resumed."
-    assert callback.reply_markup_cleared
+    assert callback.edited_text is not None
+    assert "Resumed session: s-resume-2" in callback.edited_text
+    assert "Workspace: /tmp/ws2" in callback.edited_text
+    assert "Title: Second session" in callback.edited_text
     assert TEST_CHAT_ID not in bridge._pending_resume_choices_by_chat
 
     service.fail_load = True

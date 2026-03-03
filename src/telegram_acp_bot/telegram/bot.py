@@ -414,7 +414,11 @@ class TelegramBridge:
             return
 
         await query.answer("Session resumed.")
-        await query.edit_message_reply_markup(reply_markup=None)
+        selected_message = f"Resumed session: {session_id}\nWorkspace: {candidate.workspace}\nTitle: {candidate.title}"
+        try:
+            await query.edit_message_text(selected_message)
+        except TelegramError:
+            await query.edit_message_reply_markup(reply_markup=None)
         self._pending_resume_choices_by_chat.pop(chat_id, None)
         await self._reply(update, f"Session resumed: `{session_id}` in `{candidate.workspace}`")
 
