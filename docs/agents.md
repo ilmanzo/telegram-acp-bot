@@ -9,6 +9,7 @@ Use {term}`ACP_AGENT_COMMAND` to define the command executed by `/new`.
 | Agent | ACP support | Recommended command |
 | --- | --- | --- |
 | [Gemini CLI](https://google-gemini.github.io/gemini-cli/) | Native ACP support (experimental flag required) | `ACP_AGENT_COMMAND="npx @google/gemini-cli --experimental-acp"` |
+| GitHub Copilot CLI | Native ACP support (`--acp`) | `ACP_AGENT_COMMAND="copilot --acp"` |
 | [Codex CLI](https://developers.openai.com/codex/cli) | Via ACP adapter | `ACP_AGENT_COMMAND="npx @zed-industries/codex-acp"` |
 | [Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview) / [Claude Code](https://code.claude.com/docs/en/cli-reference) | Via ACP adapter | `ACP_AGENT_COMMAND="npx @zed-industries/claude-agent-acp"` |
 
@@ -63,6 +64,15 @@ uv run acp-bot
 
 If a tool works in Zed but fails in Telegram with permission-like runtime errors, check the active runtime policy inside
 the agent session (for example `NoNewPrivs`/`Seccomp`) and compare against your Zed session.
+
+## GitHub Copilot CLI (native ACP)
+
+If you already have Copilot CLI installed and authenticated, run:
+
+```bash
+ACP_AGENT_COMMAND="copilot --acp" \
+uv run acp-bot
+```
 
 ## Claude Agent / Claude Code (via adapter)
 
