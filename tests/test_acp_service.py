@@ -219,15 +219,15 @@ async def test_acp_client_joins_adjacent_text_chunks_with_spacing():
 
     await client.session_update(
         session_id=session_id,
-        update=AgentMessageChunk(content=text_block("Creado (deleted)."), session_update="agent_message_chunk"),
+        update=AgentMessageChunk(content=text_block("Created (deleted)."), session_update="agent_message_chunk"),
     )
     await client.session_update(
         session_id=session_id,
-        update=AgentMessageChunk(content=text_block("Listo."), session_update="agent_message_chunk"),
+        update=AgentMessageChunk(content=text_block("Done."), session_update="agent_message_chunk"),
     )
 
     reply = await client.finish_capture(session_id)
-    assert reply.text == "Creado (deleted). Listo."
+    assert reply.text == "Created (deleted). Done."
 
 
 async def test_acp_client_does_not_insert_space_inside_split_word():
@@ -241,11 +241,11 @@ async def test_acp_client_does_not_insert_space_inside_split_word():
     )
     await client.session_update(
         session_id=session_id,
-        update=AgentMessageChunk(content=text_block("encio"), session_update="agent_message_chunk"),
+        update=AgentMessageChunk(content=text_block("ence"), session_update="agent_message_chunk"),
     )
 
     reply = await client.finish_capture(session_id)
-    assert reply.text == "Silencio"
+    assert reply.text == "Silence"
 
 
 async def test_acp_client_preserves_blank_lines_between_text_chunks():
@@ -255,15 +255,15 @@ async def test_acp_client_preserves_blank_lines_between_text_chunks():
 
     await client.session_update(
         session_id=session_id,
-        update=AgentMessageChunk(content=text_block("Primera linea\n\n"), session_update="agent_message_chunk"),
+        update=AgentMessageChunk(content=text_block("First line\n\n"), session_update="agent_message_chunk"),
     )
     await client.session_update(
         session_id=session_id,
-        update=AgentMessageChunk(content=text_block("Segunda linea"), session_update="agent_message_chunk"),
+        update=AgentMessageChunk(content=text_block("Second line"), session_update="agent_message_chunk"),
     )
 
     reply = await client.finish_capture(session_id)
-    assert reply.text == "Primera linea\n\nSegunda linea"
+    assert reply.text == "First line\n\nSecond line"
 
 
 async def test_acp_client_joins_adjacent_text_chunks_without_extra_spacing():
@@ -273,15 +273,15 @@ async def test_acp_client_joins_adjacent_text_chunks_without_extra_spacing():
 
     await client.session_update(
         session_id=session_id,
-        update=AgentMessageChunk(content=text_block("hola "), session_update="agent_message_chunk"),
+        update=AgentMessageChunk(content=text_block("hello "), session_update="agent_message_chunk"),
     )
     await client.session_update(
         session_id=session_id,
-        update=AgentMessageChunk(content=text_block("mundo"), session_update="agent_message_chunk"),
+        update=AgentMessageChunk(content=text_block("world"), session_update="agent_message_chunk"),
     )
 
     reply = await client.finish_capture(session_id)
-    assert reply.text == "hola mundo"
+    assert reply.text == "hello world"
 
 
 async def test_acp_client_append_text_chunk_branch_coverage():
@@ -309,8 +309,8 @@ async def test_acp_client_append_text_chunk_branch_coverage():
     assert target == ["a", "."]
 
     target = ["Sil"]
-    _AcpClient._append_text_chunk(target, "encio")
-    assert target == ["Sil", "encio"]
+    _AcpClient._append_text_chunk(target, "ence")
+    assert target == ["Sil", "ence"]
 
 
 async def test_acp_client_non_text_chunk_in_active_tool_block_is_captured():
