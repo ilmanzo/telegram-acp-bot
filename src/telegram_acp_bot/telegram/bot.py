@@ -45,6 +45,7 @@ PERMISSION_CALLBACK_PREFIX = "perm"
 RESUME_CALLBACK_PREFIX = "resume"
 PERMISSION_CALLBACK_PARTS = 3
 RESUME_CALLBACK_PARTS = 2
+MAX_RESUME_ARGS = 2
 RESUME_KEYBOARD_MAX_ROWS = 10
 RESTART_EXIT_CODE = 75
 TELEGRAM_MAX_UTF16_MESSAGE_LENGTH = 4096
@@ -74,6 +75,12 @@ class _PromptInput:
     text: str
     images: tuple[PromptImage, ...]
     files: tuple[PromptFile, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class _ResumeArgs:
+    resume_index: int | None
+    workspace: Path | None
 
 
 class ChatRequiredError(ValueError):
@@ -176,7 +183,8 @@ class TelegramBridge:
             return
         await self._reply(
             update,
-            "Send a message to start in the default workspace, or use /new [workspace] or /resume [workspace].",
+            "Send a message to start in the default workspace, or use "
+            "/new [workspace] or /resume [workspace|N [workspace]].",
         )
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -185,7 +193,8 @@ class TelegramBridge:
             return
         await self._reply(
             update,
-            "Commands: /new [workspace], /resume [workspace], /session, /cancel, /stop, /clear, /restart, /help",
+            "Commands: /new [workspace], /resume [workspace|N [workspace]], /session, "
+            "/cancel, /stop, /clear, /restart [N [workspace]], /help",
         )
 
     async def new_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -209,15 +218,20 @@ class TelegramBridge:
             response = f"{response}\nCreated workspace: `{active_workspace}`"
         await self._reply(update, response)
 
-    async def resume_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def resume_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: PLR0911
         if not await self._require_access(update):
             return
 
         chat_id = self._chat_id(update)
-        args = self._context_args(context)
-        workspace = self._workspace_from_args(args) if args else None
+        parsed_args = self._parse_resume_args(self._context_args(context))
+        if parsed_args is None:
+            await self._reply(update, "Usage: /resume [workspace] or /resume N [workspace]")
+            return
         try:
-            candidates = await self._agent_service.list_resumable_sessions(chat_id=chat_id, workspace=workspace)
+            candidates = await self._agent_service.list_resumable_sessions(
+                chat_id=chat_id,
+                workspace=parsed_args.workspace,
+            )
         except Exception as exc:  # noqa: BLE001
             await self._reply(update, f"Failed to list resumable sessions: {exc}")
             return
@@ -228,21 +242,25 @@ class TelegramBridge:
             await self._reply(update, "No resumable sessions found.")
             return
 
+        if parsed_args.resume_index is not None:
+            if parsed_args.resume_index < 0 or parsed_args.resume_index >= len(candidates):
+                await self._reply(
+                    update,
+                    f"Invalid resume index `{parsed_args.resume_index + 1}`. Choose 1..{len(candidates)}.",
+                )
+                return
+            await self._resume_candidate(update=update, chat_id=chat_id, candidate=candidates[parsed_args.resume_index])
+            return
+
         if self._app is None:
-            candidate = candidates[0]
-            session_id = await self._agent_service.load_session(
-                chat_id=chat_id,
-                session_id=candidate.session_id,
-                workspace=candidate.workspace,
-            )
-            await self._reply(update, f"Session resumed: `{session_id}` in `{candidate.workspace}`")
+            await self._resume_candidate(update=update, chat_id=chat_id, candidate=candidates[0])
             return
 
         self._pending_resume_choices_by_chat[chat_id] = candidates
         keyboard = self._resume_keyboard(candidates=candidates)
         message = "Pick a session to resume:"
-        if workspace is not None:
-            message = f"Pick a session to resume in `{workspace}`:"
+        if parsed_args.workspace is not None:
+            message = f"Pick a session to resume in `{parsed_args.workspace}`:"
         await self._app.bot.send_message(
             chat_id=chat_id,
             text=message,
@@ -295,9 +313,45 @@ class TelegramBridge:
             return
         await self._reply(update, "No active session. Use /new first.")
 
-    async def restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        del context
+    async def restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # noqa: PLR0911
         if not await self._require_access(update):
+            return
+
+        chat_id = self._chat_id(update)
+        parsed_args = self._parse_resume_args(self._context_args(context))
+        if parsed_args is None:
+            await self._reply(update, "Usage: /restart or /restart N [workspace]")
+            return
+        if parsed_args.workspace is not None and parsed_args.resume_index is None:
+            await self._reply(update, "Usage: /restart or /restart N [workspace]")
+            return
+        if parsed_args.resume_index is not None:
+            try:
+                candidates = await self._agent_service.list_resumable_sessions(
+                    chat_id=chat_id,
+                    workspace=parsed_args.workspace,
+                )
+            except Exception as exc:  # noqa: BLE001
+                await self._reply(update, f"Failed to list resumable sessions: {exc}")
+                return
+            if candidates is None:
+                await self._reply(update, "Agent does not support ACP `session/list`.")
+                return
+            if not candidates:
+                await self._reply(update, "No resumable sessions found.")
+                return
+            if parsed_args.resume_index < 0 or parsed_args.resume_index >= len(candidates):
+                await self._reply(
+                    update,
+                    f"Invalid restart index `{parsed_args.resume_index + 1}`. Choose 1..{len(candidates)}.",
+                )
+                return
+            await self._resume_candidate(
+                update=update,
+                chat_id=chat_id,
+                candidate=candidates[parsed_args.resume_index],
+                success_label="Session restarted",
+            )
             return
 
         if self._app is None:
@@ -447,6 +501,26 @@ class TelegramBridge:
             return None
 
         return chat_id, candidates[index]
+
+    async def _resume_candidate(
+        self,
+        *,
+        update: Update,
+        chat_id: int,
+        candidate: ResumableSession,
+        success_label: str = "Session resumed",
+    ) -> bool:
+        try:
+            session_id = await self._agent_service.load_session(
+                chat_id=chat_id,
+                session_id=candidate.session_id,
+                workspace=candidate.workspace,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await self._reply(update, f"Failed to resume session `{candidate.session_id}`: {exc}")
+            return False
+        await self._reply(update, f"{success_label}: `{session_id}` in `{candidate.workspace}`")
+        return True
 
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._require_access(update):
@@ -705,6 +779,26 @@ class TelegramBridge:
         if not args:
             return []
         return list(args)
+
+    def _parse_resume_args(self, args: list[str]) -> _ResumeArgs | None:
+        if len(args) > MAX_RESUME_ARGS:
+            return None
+        raw_index: int | None = None
+        workspace_arg: str | None = None
+        for arg in args:
+            if arg.isdigit():
+                if raw_index is not None:
+                    return None
+                raw_index = int(arg)
+                continue
+            if workspace_arg is not None:
+                return None
+            workspace_arg = arg
+        if raw_index is not None and raw_index < 1:
+            return None
+        workspace = self._workspace_from_args([workspace_arg]) if workspace_arg is not None else None
+        resume_index = raw_index - 1 if raw_index is not None else None
+        return _ResumeArgs(resume_index=resume_index, workspace=workspace)
 
     @staticmethod
     async def _reply(update: Update, text: str) -> None:

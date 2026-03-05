@@ -40,10 +40,22 @@ List resumable sessions and pick one from buttons:
 /resume
 ```
 
+Resume by list index (1-based):
+
+```text
+/resume 2
+```
+
 List resumable sessions for a specific workspace:
 
 ```text
 /resume /home/user/project
+```
+
+Resume by index inside a specific workspace:
+
+```text
+/resume 1 /home/user/project
 ```
 
 When you tap a button, the bot calls ACP `session/load` and switches the active conversation for that chat.
@@ -85,6 +97,18 @@ Clear current session:
 ```
 
 The bot exits polling and re-execs the process (or uses `ACP_RESTART_COMMAND` if configured).
+
+Restart by resuming a specific saved session (without restarting the process):
+
+```text
+/restart 1
+```
+
+You can combine index and workspace filter:
+
+```text
+/restart 2 /home/user/project
+```
 
 ## Notes
 

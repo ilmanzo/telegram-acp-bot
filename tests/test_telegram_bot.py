@@ -428,6 +428,31 @@ async def test_restart_requests_app_stop():
     assert stop_calls == ["stop"]
 
 
+async def test_restart_with_index_resumes_selected_candidate():
+    service = ResumeService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=cast(AgentService, service),
+    )
+    update = make_update(chat_id=TEST_CHAT_ID, with_message=True)
+
+    await bridge.restart(update, make_context(args=["1"]))
+
+    assert service.loaded == (TEST_CHAT_ID, "s-resume-1", Path("/tmp/ws1"))
+    assert update.message is not None
+    assert update.message.replies == ["Session restarted: s-resume-1 in /tmp/ws1"]
+
+
+async def test_restart_with_workspace_arg_only_reports_usage():
+    bridge = make_bridge()
+    update = make_update(with_message=True)
+
+    await bridge.restart(update, make_context(args=["/tmp/ws"]))
+
+    assert update.message is not None
+    assert update.message.replies == ["Usage: /restart or /restart N [workspace]"]
+
+
 async def test_restart_requires_running_application():
     bridge = make_bridge()
     update = make_update(with_message=True)
@@ -562,6 +587,35 @@ async def test_resume_session_with_workspace_arg_includes_workspace_in_message(t
     assert bot.sent_messages
     payload = bot.sent_messages[-1]
     assert "Pick a session to resume in" in cast(str, payload["text"])
+
+
+async def test_resume_session_with_index_arg_loads_selected_candidate():
+    service = ResumeService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=cast(AgentService, service),
+    )
+    update = make_update(chat_id=TEST_CHAT_ID)
+
+    await bridge.resume_session(update, make_context(args=["2"]))
+
+    assert service.loaded == (TEST_CHAT_ID, "s-resume-2", Path("/tmp/ws2"))
+    assert update.message is not None
+    assert update.message.replies == ["Session resumed: s-resume-2 in /tmp/ws2"]
+
+
+async def test_resume_session_with_invalid_index_reports_error():
+    service = ResumeService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=cast(AgentService, service),
+    )
+    update = make_update(chat_id=TEST_CHAT_ID)
+
+    await bridge.resume_session(update, make_context(args=["9"]))
+
+    assert update.message is not None
+    assert update.message.replies == ["Invalid resume index 9. Choose 1..2."]
 
 
 async def test_resume_session_reports_list_not_supported():
