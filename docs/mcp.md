@@ -53,8 +53,10 @@ To map MCP calls to the right Telegram chat:
 
 - `AcpAgentService` stores `session_id -> chat_id` in a local state file.
 - The MCP server reads that mapping before sending attachments.
-- If `session_id` is omitted, MCP infers it only when there is exactly one active mapped session.
-- When multiple mapped sessions exist, provide `session_id` explicitly.
+- If `session_id` is omitted, MCP tries to infer it in this order:
+  - single active mapped session
+  - `last_session_id` saved in channel state (if still active)
+- If ambiguity remains, MCP returns an explicit error including candidate `session_id` values.
 
 ## Sequence
 
@@ -70,7 +72,7 @@ sequenceDiagram
     U->>B: "Send me /webcam.jpg"
     B->>A: ACP prompt
     A->>M: telegram_send_attachment(session_id="s1", data_base64="...")
-    M->>M: resolve session_id (explicit or single active mapping)
+    M->>M: resolve session_id (explicit, single mapping, or last active)
     M->>M: map session_id -> chat_id
     M->>T: sendPhoto/sendDocument(chat_id, file)
     T-->>U: Attachment delivered
@@ -82,4 +84,4 @@ sequenceDiagram
 ## Limitations
 
 - Follow-up suggestion buttons are not implemented yet in MCP.
-- Multi-session ambiguity can require explicit `session_id`.
+- Multi-session ambiguity can still require explicit `session_id` when no valid last active session is available.
