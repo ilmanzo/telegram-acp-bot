@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from collections.abc import Awaitable, Callable
@@ -64,6 +65,14 @@ class BotConfig:
     token: str
     allowed_user_ids: set[int]
     default_workspace: Path
+
+
+@dataclass(slots=True, frozen=True)
+class _PromptInput:
+    chat_id: int
+    text: str
+    images: tuple[PromptImage, ...]
+    files: tuple[PromptFile, ...]
 
 
 class ChatRequiredError(ValueError):
@@ -136,6 +145,7 @@ class TelegramBridge:
         self._agent_service = agent_service
         self._app: Application | None = None
         self._restart_requested = False
+        self._implicit_start_locks_by_chat: dict[int, asyncio.Lock] = {}
         self._pending_resume_choices_by_chat: dict[int, tuple[ResumableSession, ...]] = {}
         if hasattr(self._agent_service, "set_permission_request_handler"):
             self._agent_service.set_permission_request_handler(self.on_permission_request)
@@ -163,7 +173,10 @@ class TelegramBridge:
         del context
         if not await self._require_access(update):
             return
-        await self._reply(update, "Use /new [workspace] or /resume [workspace] to start a session.")
+        await self._reply(
+            update,
+            "Send a message to start in the default workspace, or use /new [workspace] or /resume [workspace].",
+        )
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -181,19 +194,15 @@ class TelegramBridge:
         chat_id = self._chat_id(update)
         workspace = self._workspace_from_args(self._context_args(context))
         workspace_was_missing = not workspace.exists()
-        try:
-            session_id = await self._agent_service.new_session(chat_id=chat_id, workspace=workspace)
-        except ValueError as exc:
-            message = str(exc) or str(workspace)
-            await self._reply(update, f"Invalid workspace: {message}")
+        started = await self._start_session(
+            update=update,
+            chat_id=chat_id,
+            workspace=workspace,
+            invalid_workspace_label="Invalid workspace",
+        )
+        if started is None:
             return
-        except RuntimeError:
-            await self._reply(update, "Failed to start session: agent process did not expose stdio pipes.")
-            return
-        except Exception as exc:  # noqa: BLE001
-            await self._reply(update, f"Failed to start session: {exc}")
-            return
-        active_workspace = self._agent_service.get_workspace(chat_id=chat_id) or workspace
+        session_id, active_workspace = started
         response = f"Session started: `{session_id}` in `{active_workspace}`"
         if workspace_was_missing:
             response = f"{response}\nCreated workspace: `{active_workspace}`"
@@ -456,38 +465,128 @@ class TelegramBridge:
         if not await self._require_access(update):
             return
 
-        message = update.message
-        if message is None:
+        prompt_input = await self._prompt_input(update=update, context=context)
+        if prompt_input is None:
             return
 
+        if not await self._ensure_session_for_chat(update=update, chat_id=prompt_input.chat_id):
+            return
+
+        reply = await self._request_reply(
+            update=update,
+            context=context,
+            prompt_input=prompt_input,
+        )
+        if reply is None:
+            return
+
+        if self._app is None:
+            workspace = self._activity_workspace(chat_id=prompt_input.chat_id)
+            for block in reply.activity_blocks:
+                await self._reply_activity_block(update, block, workspace=workspace)
+        if reply.text.strip():
+            await self._reply_agent(update, reply.text)
+        await self._send_attachments(update, reply)
+
+    async def _start_implicit_session(self, *, update: Update, chat_id: int) -> bool:
+        workspace = self._config.default_workspace
+        started = await self._start_session(
+            update=update,
+            chat_id=chat_id,
+            workspace=workspace,
+            invalid_workspace_label="Invalid default workspace",
+        )
+        return started is not None
+
+    async def _prompt_input(self, *, update: Update, context: ContextTypes.DEFAULT_TYPE) -> _PromptInput | None:
+        message = update.message
+        if message is None:
+            return None
         text = message.text or message.caption or ""
         images = await self._extract_prompt_images(message=message, context=context)
         files = await self._extract_prompt_files(message=message, context=context)
         if not text and not images and not files:
-            return
+            return None
+        return _PromptInput(chat_id=self._chat_id(update), text=text, images=images, files=files)
 
-        chat_id = self._chat_id(update)
-        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    async def _ensure_session_for_chat(self, *, update: Update, chat_id: int) -> bool:
+        if self._agent_service.get_workspace(chat_id=chat_id) is not None:
+            self._drop_implicit_start_lock(chat_id=chat_id)
+            return True
+        lock = self._implicit_start_lock(chat_id)
+        async with lock:
+            if self._agent_service.get_workspace(chat_id=chat_id) is not None:
+                self._drop_implicit_start_lock(chat_id=chat_id, expected_lock=lock)
+                return True
+            started = await self._start_implicit_session(update=update, chat_id=chat_id)
+            if self._agent_service.get_workspace(chat_id=chat_id) is not None:
+                self._drop_implicit_start_lock(chat_id=chat_id, expected_lock=lock)
+            return started
+
+    async def _start_session(
+        self,
+        *,
+        update: Update,
+        chat_id: int,
+        workspace: Path,
+        invalid_workspace_label: str,
+    ) -> tuple[str, Path] | None:
         try:
-            reply = await self._agent_service.prompt(chat_id=chat_id, text=text, images=images, files=files)
+            session_id = await self._agent_service.new_session(chat_id=chat_id, workspace=workspace)
+        except ValueError as exc:
+            message = str(exc) or str(workspace)
+            await self._reply(update, f"{invalid_workspace_label}: {message}")
+            return None
+        except RuntimeError:
+            await self._reply(update, "Failed to start session: agent process did not expose stdio pipes.")
+            return None
+        except Exception as exc:  # noqa: BLE001
+            await self._reply(update, f"Failed to start session: {exc}")
+            return None
+        active_workspace = self._agent_service.get_workspace(chat_id=chat_id) or workspace
+        return session_id, active_workspace
+
+    def _implicit_start_lock(self, chat_id: int) -> asyncio.Lock:
+        lock = self._implicit_start_locks_by_chat.get(chat_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._implicit_start_locks_by_chat[chat_id] = lock
+        return lock
+
+    def _drop_implicit_start_lock(self, *, chat_id: int, expected_lock: asyncio.Lock | None = None) -> None:
+        current_lock = self._implicit_start_locks_by_chat.get(chat_id)
+        if current_lock is None:
+            return
+        if expected_lock is not None and current_lock is not expected_lock:
+            return
+        self._implicit_start_locks_by_chat.pop(chat_id, None)
+
+    async def _request_reply(
+        self,
+        *,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        prompt_input: _PromptInput,
+    ) -> AgentReply | None:
+        await context.bot.send_chat_action(chat_id=prompt_input.chat_id, action=ChatAction.TYPING)
+        try:
+            reply = await self._agent_service.prompt(
+                chat_id=prompt_input.chat_id,
+                text=prompt_input.text,
+                images=prompt_input.images,
+                files=prompt_input.files,
+            )
         except AgentOutputLimitExceededError:
             await self._reply(
                 update,
                 "Agent output exceeded ACP stdio limit. Restart with a higher `--acp-stdio-limit` "
                 "(or `ACP_STDIO_LIMIT`).",
             )
-            return
-        if reply is None:
-            await self._reply(update, "No active session. Use /new first.")
-            return
-
-        if self._app is None:
-            workspace = self._activity_workspace(chat_id=chat_id)
-            for block in reply.activity_blocks:
-                await self._reply_activity_block(update, block, workspace=workspace)
-        if reply.text.strip():
-            await self._reply_agent(update, reply.text)
-        await self._send_attachments(update, reply)
+            return None
+        if reply is not None:
+            return reply
+        await self._reply(update, "No active session. Send a message again or use /new [workspace].")
+        return None
 
     async def _extract_prompt_images(
         self,
