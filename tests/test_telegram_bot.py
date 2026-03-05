@@ -1369,7 +1369,7 @@ async def test_on_permission_request_sends_buttons():
     assert len(dummy_bot.sent_messages) == 1
     payload = dummy_bot.sent_messages[0]
     assert payload["chat_id"] == TEST_CHAT_ID
-    assert cast(str, payload["text"]).startswith("Permission required")
+    assert cast(str, payload["text"]).startswith("⚠️ Permission required")
     assert cast(str, payload["text"]).endswith("ls")
     assert "parse_mode" not in payload
     assert "entities" in payload
@@ -1414,7 +1414,7 @@ async def test_on_permission_request_markdown_fallback_uses_plain_text():
 
     assert len(failing_bot.sent_messages) == 1
     payload = failing_bot.sent_messages[0]
-    assert payload["text"] == "Permission required\n\nls"
+    assert payload["text"] == "⚠️ Permission required\n\nls"
     assert "parse_mode" not in payload
     assert "entities" not in payload
 

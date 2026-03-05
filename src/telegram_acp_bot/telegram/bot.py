@@ -312,11 +312,7 @@ class TelegramBridge:
             return
 
         keyboard = self._permission_keyboard(request)
-        title = TelegramBridge._format_permission_tool_title(request.tool_title)
-        message_parts = ["Permission required"]
-        if title:
-            message_parts.append(TelegramBridge._render_activity_part(title))
-        message = "\n\n".join(message_parts)
+        message = TelegramBridge._format_permission_request_text(request.tool_title)
         await TelegramBridge._send_markdown_to_chat(
             bot=self._app.bot,
             chat_id=request.chat_id,
@@ -846,6 +842,14 @@ class TelegramBridge:
                 AgentActivityBlock(kind="execute", title=title, status="in_progress")
             )
         return title
+
+    @staticmethod
+    def _format_permission_request_text(tool_title: str) -> str:
+        title = TelegramBridge._format_permission_tool_title(tool_title)
+        message_parts = ["*⚠️ Permission required*"]
+        if title:
+            message_parts.append(TelegramBridge._render_activity_part(title))
+        return "\n\n".join(message_parts)
 
     @staticmethod
     def _split_execute_commands(command: str) -> list[str]:
