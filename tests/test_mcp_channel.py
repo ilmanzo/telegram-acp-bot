@@ -79,6 +79,30 @@ async def test_send_attachment_from_base64_as_document(tmp_path: Path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_send_attachment_infers_last_active_session_when_multiple(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker
+):
+    expected_chat_id = 456
+    state_file = tmp_path / "state.json"
+    save_session_chat_map(state_file, {"s1": 123, "s2": expected_chat_id})
+    save_last_session_id(state_file, "s2")
+    monkeypatch.setenv(TOKEN_ENV, "TOKEN")
+    monkeypatch.setenv(STATE_FILE_ENV, str(state_file))
+    bot = mocker.AsyncMock()
+    mocker.patch("telegram_acp_bot.mcp_channel.Bot", return_value=bot)
+
+    result = await mcp_channel.telegram_send_attachment(
+        data_base64=base64.b64encode(b"payload").decode("ascii"),
+        name="artifact.bin",
+    )
+
+    assert result["ok"] is True
+    assert result["session_id"] == "s2"
+    assert result["chat_id"] == expected_chat_id
+    bot.send_document.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_send_attachment_rejects_missing_session_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     state_file = tmp_path / "state.json"
     save_session_chat_map(state_file, {})
@@ -184,7 +208,39 @@ def test_resolve_request_context_requires_explicit_session_when_multiple_mapping
 
     result = mcp_channel._resolve_request_context(session_id=None, path="file.bin", data_base64=None)
 
-    assert result == "missing session_id when multiple active sessions exist"
+    assert (
+        result == "missing session_id: multiple active sessions exist and no last active session could be inferred. "
+        "Available session_ids: s1, s2"
+    )
+
+
+def test_resolve_request_context_uses_last_active_session_when_multiple_mappings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    state_file = tmp_path / "state.json"
+    save_session_chat_map(state_file, {"s1": 123, "s2": 456})
+    save_last_session_id(state_file, "s2")
+    monkeypatch.setenv(TOKEN_ENV, "TOKEN")
+    monkeypatch.setenv(STATE_FILE_ENV, str(state_file))
+
+    result = mcp_channel._resolve_request_context(session_id=None, path="file.bin", data_base64=None)
+
+    assert result == mcp_channel._RequestContext(token="TOKEN", chat_id=456, session_id="s2")
+
+
+def test_resolve_request_context_ignores_stale_last_session_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    state_file = tmp_path / "state.json"
+    save_session_chat_map(state_file, {"s1": 123, "s2": 456})
+    save_last_session_id(state_file, "stale")
+    monkeypatch.setenv(TOKEN_ENV, "TOKEN")
+    monkeypatch.setenv(STATE_FILE_ENV, str(state_file))
+
+    result = mcp_channel._resolve_request_context(session_id=None, path="file.bin", data_base64=None)
+
+    assert isinstance(result, str)
+    assert result.startswith(
+        "missing session_id: multiple active sessions exist and no last active session could be inferred."
+    )
 
 
 def test_load_session_chat_map_handles_invalid_json(tmp_path: Path):
