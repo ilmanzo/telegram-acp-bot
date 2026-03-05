@@ -33,7 +33,7 @@ uvx --from git+https://github.com/mgaitan/telegram-acp-bot acp-bot
 ```
 
 Current interaction capabilities:
-- `/new [workspace]`, `/session`, `/cancel`, `/stop`, `/clear`, `/restart`
+- `/new [workspace]`, `/resume [N|workspace]`, `/session`, `/cancel`, `/stop`, `/clear`, `/restart [N [workspace]]`
 - Interactive permission prompts with inline buttons (`Always`, `This time`, `Deny`)
 - Plain text prompts
 - Tool activity updates are sent as separate messages per ACP tool kind

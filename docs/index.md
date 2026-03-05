@@ -39,11 +39,12 @@ You can also set `TELEGRAM_BOT_TOKEN` and `ACP_AGENT_COMMAND` in a local `.env` 
 
 Supported bot commands:
 - `/new [workspace]`
-- `/resume [workspace]`
+- `/resume [N|workspace]`
 - `/session`
 - `/cancel`
 - `/stop`
 - `/clear`
+- `/restart [N [workspace]]`
 
 Session behavior:
 - The first user prompt in a chat starts a session implicitly in the default workspace.
