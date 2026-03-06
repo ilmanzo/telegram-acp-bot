@@ -901,6 +901,8 @@ class TelegramBridge:
     def _format_path_activity_targets(raw_targets: str, *, prefix: str, workspace: Path | None) -> str:
         targets = TelegramBridge._split_path_activity_targets(raw_targets, prefix=prefix)
         return "\n".join(TelegramBridge._format_read_path(target, workspace=workspace) for target in targets)
+
+    @staticmethod
     def _escape_markdown_preserving_code(text: str) -> str:
         escaped: list[str] = []
         in_code = False
