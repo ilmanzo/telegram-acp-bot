@@ -38,7 +38,7 @@ Description: A Telegram bot that implements Agent Client Protocol to interact wi
 - Ensure you are in a proper branch for each new feature or bugfix.
 - Never commit or push automatically unless instructed otherwise.
 - Prefer `gh` CLI for all interactions with GitHub if possible. Eg. Use it to open PRs / manage issues.
-- For `gh pr` interactions, prefer `--body-file` with a temporary file created under `/tmp/`.
+- For `gh pr` interactions, prefer `--body-file` with a temporary file created in the system temp directory (for example via `mktemp` or `$TMPDIR`), and delete the file after the command completes.
 - For issue categorization, use GitHub labels instead of title prefixes like `Bug:`, `Feat:`, or `Docs:`.
 - Before assigning labels, inspect labels already used in the target repository and follow that taxonomy first.
 - If labels are missing or incomplete, use this baseline set: `bug`, `enhancement`, `documentation`, `maintenance`, `refactor`, `test`, `ci`, `dependencies`, `security`, `performance`, `ux`, `question`.
