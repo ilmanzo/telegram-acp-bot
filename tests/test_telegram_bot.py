@@ -1449,6 +1449,68 @@ async def test_format_activity_block_search_shows_query_from_text_only():
     assert 'Query: "acp sessions"' in rendered
 
 
+async def test_format_activity_block_search_omits_generic_body_text():
+    block = AgentActivityBlock(
+        kind="search",
+        title="Searching the Web",
+        status="in_progress",
+        text="Searching the Web",
+    )
+    rendered = TelegramBridge._format_activity_block(block)
+    assert "*🌐 Searching*" in rendered
+    assert "\n\nSearching the Web" not in rendered
+
+
+async def test_format_activity_block_search_keeps_non_generic_body_when_title_is_generic():
+    block = AgentActivityBlock(
+        kind="search",
+        title="Searching the Web",
+        status="completed",
+        text="Collecting candidate pages",
+    )
+    rendered = TelegramBridge._format_activity_block(block)
+    assert "Collecting candidate pages" in rendered
+
+
+async def test_format_activity_block_search_falls_back_to_raw_text_when_no_details():
+    block = AgentActivityBlock(kind="search", title="", status="completed", text="Scanning docs index")
+    rendered = TelegramBridge._format_activity_block(block)
+    assert "Scanning docs index" in rendered
+    assert "Query:" not in rendered
+    assert "URL:" not in rendered
+
+
+async def test_format_activity_block_search_falls_back_to_title_as_query():
+    block = AgentActivityBlock(kind="search", title="telegram acp bot mcp", status="completed")
+    rendered = TelegramBridge._format_activity_block(block)
+    assert 'Query: "telegram acp bot mcp"' in rendered
+
+
+async def test_extract_search_query_empty_returns_none():
+    assert TelegramBridge._extract_search_query(title="", text="") is None
+
+
+async def test_extract_urls_deduplicates_matches():
+    text = "A https://example.com/a and again https://example.com/a and https://example.com/b."
+    assert TelegramBridge._extract_urls(text) == ["https://example.com/a", "https://example.com/b"]
+
+
+async def test_is_generic_search_label_blank_is_false():
+    assert TelegramBridge._is_generic_search_label("   ") is False
+
+
+async def test_clean_search_query_generic_label_returns_empty():
+    assert TelegramBridge._clean_search_query("Searching the Web") == ""
+
+
+async def test_clean_search_query_url_only_returns_empty():
+    assert TelegramBridge._clean_search_query("https://example.com") == ""
+
+
+async def test_normalize_search_activity_keeps_blank_text_when_title_is_generic():
+    assert TelegramBridge._normalize_search_activity(title="Searching the Web", text=" ") == ("", " ")
+
+
 async def test_format_activity_block_preserves_thinking_inline_code():
     block = AgentActivityBlock(
         kind="think",

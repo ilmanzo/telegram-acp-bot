@@ -904,6 +904,8 @@ class TelegramBridge:
         details.extend(f"URL: {url}" for url in urls)
         if details:
             return "", "\n".join(details)
+        if TelegramBridge._is_generic_search_label(title) and TelegramBridge._is_generic_search_label(text):
+            return "", ""
         if TelegramBridge._is_generic_search_label(title):
             return "", text
         return title, text
