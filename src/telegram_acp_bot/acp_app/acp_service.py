@@ -779,7 +779,7 @@ class AcpAgentService:
                 connection.initialize(
                     protocol_version=PROTOCOL_VERSION,
                     client_capabilities=ClientCapabilities(),
-                    client_info=Implementation(name="telegram-acp-bot", title="Telegram ACP Bot", version="0.1.0"),
+                    client_info=Implementation(name="telegram-acp-bot", title="Telegram ACP Bot", version="0.1.1"),
                 ),
                 timeout=self._connect_timeout,
             )
