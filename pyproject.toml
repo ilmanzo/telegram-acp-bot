@@ -100,6 +100,7 @@ Funding = "https://github.com/sponsors/mgaitan"
 
 [project.scripts]
 acp-bot = "telegram_acp_bot:main"
+telegram-acp-bot = "telegram_acp_bot:main"
 
 [dependency-groups]
 test = [

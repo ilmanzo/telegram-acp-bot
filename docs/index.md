@@ -14,7 +14,13 @@ A Telegram bot that implements Agent Client Protocol to interact with AI agents
 Run directly without installing via `uvx`
 
 ```bash
-uvx --with=telegram-acp-bot acp-bot --help
+uvx telegram-acp-bot --help
+```
+
+Run the latest development version from git:
+
+```bash
+uvx --from git+https://github.com/mgaitan/telegram-acp-bot acp-bot --help
 ```
 
 ```{richterm} env PYTHONPATH=../src uv run -m telegram_acp_bot --help
@@ -32,7 +38,7 @@ Run the bot with a real ACP agent:
 ```bash
 TELEGRAM_BOT_TOKEN=123456:abc \
 ACP_AGENT_COMMAND="codex-acp" \
-uvx --with=telegram-acp-bot acp-bot
+uvx telegram-acp-bot
 ```
 
 You can also set `TELEGRAM_BOT_TOKEN` and `ACP_AGENT_COMMAND` in a local `.env` file.

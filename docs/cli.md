@@ -1,6 +1,6 @@
 # CLI Reference
 
-The bot entrypoint is `acp-bot`.
+The bot entrypoints are `telegram-acp-bot` and `acp-bot` (alias).
 
 ```{richterm} env PYTHONPATH=../src uv run -m telegram_acp_bot --help
 :hide-command: true
@@ -60,4 +60,4 @@ The bot entrypoint is `acp-bot`.
   - Configure at least one allowlist entry via `--allowed-user-id`, `--allowed-username`,
     {term}`TELEGRAM_ALLOWED_USER_IDS`, or {term}`TELEGRAM_ALLOWED_USERNAMES`.
 - MCP behavior:
-  - `acp-bot` always advertises an internal MCP stdio server (`telegram-channel`) to the ACP agent.
+  - `telegram-acp-bot` and `acp-bot` always advertise an internal MCP stdio server (`telegram-channel`) to the ACP agent.
