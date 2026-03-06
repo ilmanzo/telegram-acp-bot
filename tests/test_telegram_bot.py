@@ -1423,6 +1423,32 @@ async def test_format_activity_block_read_prefers_file_uri_path():
     assert "`/home/tin/lab/telegram-acp/README.md`" in rendered
 
 
+async def test_format_activity_block_search_uses_specific_label_not_tool_call():
+    block = AgentActivityBlock(kind="search", title="Searching the Web", status="in_progress")
+    rendered = TelegramBridge._format_activity_block(block)
+    assert "*🌐 Searching*" in rendered
+    assert "Tool call" not in rendered
+    assert "\n\nSearching the Web" not in rendered
+
+
+async def test_format_activity_block_search_shows_query_and_url_details():
+    block = AgentActivityBlock(
+        kind="search",
+        title='Searching the Web for "telegram acp bot mcp"',
+        status="completed",
+        text="source: https://agentclientprotocol.com/docs",
+    )
+    rendered = TelegramBridge._format_activity_block(block)
+    assert 'Query: "telegram acp bot mcp"' in rendered
+    assert "URL: https://agentclientprotocol.com/docs" in rendered
+
+
+async def test_format_activity_block_search_shows_query_from_text_only():
+    block = AgentActivityBlock(kind="search", title="Searching", status="completed", text='Query: "acp sessions"')
+    rendered = TelegramBridge._format_activity_block(block)
+    assert 'Query: "acp sessions"' in rendered
+
+
 async def test_format_activity_block_preserves_thinking_inline_code():
     block = AgentActivityBlock(
         kind="think",
