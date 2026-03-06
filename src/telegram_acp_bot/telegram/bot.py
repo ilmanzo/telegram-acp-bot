@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from io import BytesIO
@@ -55,7 +56,7 @@ KIND_LABELS = {
     "think": "💡 Thinking",
     "execute": "⚙️ Running",
     "read": "📖 Reading",
-    "search": "🔎 Searching",
+    "search": "🌐 Searching",
     "edit": "✏️ Editing",
     "write": "✍️ Writing",
 }
@@ -863,6 +864,10 @@ class TelegramBridge:
         text_parts = [f"*{label}*"]
         normalized_title = TelegramBridge._normalize_activity_title(block, workspace=workspace)
         normalized_text = TelegramBridge._normalize_activity_text(block, workspace=workspace)
+        if block.kind == "search":
+            normalized_title, normalized_text = TelegramBridge._normalize_search_activity(
+                title=normalized_title, text=normalized_text
+            )
         if normalized_title and normalized_text and normalized_title == normalized_text:
             normalized_title = ""
         if normalized_title:
@@ -908,6 +913,81 @@ class TelegramBridge:
     def _format_path_activity_targets(raw_targets: str, *, prefix: str, workspace: Path | None) -> str:
         targets = TelegramBridge._split_path_activity_targets(raw_targets, prefix=prefix)
         return "\n".join(TelegramBridge._format_read_path(target, workspace=workspace) for target in targets)
+
+    @staticmethod
+    def _normalize_search_activity(*, title: str, text: str) -> tuple[str, str]:
+        query = TelegramBridge._extract_search_query(title=title, text=text)
+        urls = TelegramBridge._extract_urls(f"{title}\n{text}")
+        details: list[str] = []
+        if query:
+            details.append(f'Query: "{query}"')
+        details.extend(f"URL: {url}" for url in urls)
+        if details:
+            return "", "\n".join(details)
+        if TelegramBridge._is_generic_search_label(title) and TelegramBridge._is_generic_search_label(text):
+            return "", ""
+        if TelegramBridge._is_generic_search_label(title):
+            return "", text
+        return title, text
+
+    @staticmethod
+    def _extract_search_query(*, title: str, text: str) -> str | None:
+        combined = "\n".join(part for part in (title, text) if part)
+        if not combined:
+            return None
+        candidates = (
+            re.search(r'(?im)\bquery\s*[:=]\s*["`]?(.+?)["`]?\s*$', combined),
+            re.search(r'(?im)\bq\s*[:=]\s*["`]?(.+?)["`]?\s*$', combined),
+            re.search(r'(?im)\bsearch(?:ing)?(?: the web)?(?: for)?\s*[:\-]?\s*["`]?(.+?)["`]?\s*$', combined),
+        )
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            normalized = TelegramBridge._clean_search_query(candidate.group(1))
+            if normalized:
+                return normalized
+        if title and not TelegramBridge._is_generic_search_label(title):
+            normalized_title = TelegramBridge._clean_search_query(title)
+            if normalized_title:
+                return normalized_title
+        return None
+
+    @staticmethod
+    def _clean_search_query(raw_query: str) -> str:
+        query = re.sub(r"https?://\S+", "", raw_query)
+        query = " ".join(query.strip().strip("\"'`").split())
+        if not query:
+            return ""
+        if TelegramBridge._is_generic_search_label(query):
+            return ""
+        return query
+
+    @staticmethod
+    def _extract_urls(text: str) -> list[str]:
+        url_matches = re.findall(r"https?://[^\s)]+", text)
+        urls: list[str] = []
+        seen: set[str] = set()
+        for match in url_matches:
+            url = match.rstrip(".,;:")
+            if url in seen:
+                continue
+            seen.add(url)
+            urls.append(url)
+        return urls
+
+    @staticmethod
+    def _is_generic_search_label(text: str) -> bool:
+        normalized = " ".join(text.strip().casefold().split())
+        if not normalized:
+            return False
+        return normalized in {
+            "search",
+            "searching",
+            "searching web",
+            "searching the web",
+            "searching internet",
+            "searching the internet",
+        }
 
     @staticmethod
     def _escape_markdown_preserving_code(text: str) -> str:
