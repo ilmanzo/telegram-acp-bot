@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/mgaitan/telegram-acp-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/mgaitan/telegram-acp-bot/actions/workflows/ci.yml)
 [![docs](https://img.shields.io/badge/docs-blue.svg?style=flat)](https://mgaitan.github.io/telegram-acp-bot/)
+[![PyPI version](https://img.shields.io/pypi/v/telegram-acp-bot?logo=pypi&logoColor=white)](https://pypi.org/project/telegram-acp-bot/)
 [![Changelog](https://img.shields.io/github/v/release/mgaitan/telegram-acp-bot?include_prereleases&label=changelog)](https://github.com/mgaitan/telegram-acp-bot/releases)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/mgaitan/telegram-acp-bot/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/mgaitan/telegram-acp-bot/blob/main/LICENSE)
@@ -21,7 +22,13 @@ Development has included extensive use of `gpt-5.3-codex`.
 Run directly without installing via `uvx`:
 
 ```bash
-uvx --from git+https://github.com/mgaitan/telegram-acp-bot acp-bot --help
+uvx telegram-acp-bot --help
+```
+
+Run the latest development version from git:
+
+```bash
+uvx --from git+https://github.com/mgaitan/telegram-acp-bot telegram-acp-bot --help
 ```
 
 Run the bot with a real ACP agent:
@@ -29,7 +36,7 @@ Run the bot with a real ACP agent:
 ```bash
 TELEGRAM_BOT_TOKEN=123456:abc \
 ACP_AGENT_COMMAND="npx @zed-industries/codex-acp" \
-uvx --from git+https://github.com/mgaitan/telegram-acp-bot acp-bot
+uvx telegram-acp-bot
 ```
 
 Current interaction capabilities:
@@ -69,7 +76,7 @@ TELEGRAM_BOT_TOKEN=123456:abc
 TELEGRAM_ALLOWED_USER_IDS=123456789
 # TELEGRAM_ALLOWED_USERNAMES=alice,@bob
 ACP_AGENT_COMMAND="npx @zed-industries/codex-acp"
-ACP_RESTART_COMMAND="uv run acp-bot --telegram-token <TOKEN> --agent-command \"npx @zed-industries/codex-acp\""
+ACP_RESTART_COMMAND="uv run telegram-acp-bot --telegram-token <TOKEN> --agent-command \"npx @zed-industries/codex-acp\""
 ACP_PERMISSION_MODE=ask
 ACP_PERMISSION_EVENT_OUTPUT=stdout
 ACP_STDIO_LIMIT=8388608
@@ -88,13 +95,13 @@ ACP_AGENT_COMMAND="npx @zed-industries/codex-acp"
 To install the tool permanently:
 
 ```bash
-uv tool install --from git+https://github.com/mgaitan/telegram-acp-bot acp-bot
+uv tool install telegram-acp-bot
 ```
 
 ## Development
 
 - Install dependencies with `uv sync`.
-- Then run `uv run acp-bot`
+- Then run `uv run telegram-acp-bot`
 - New dependency releases are delayed by one week via `uv` cooldown (`[tool.uv].exclude-newer = "1 week"`), with per-package overrides when required (for example, `ty`).
 - Run the QA bundle with [`ty`](https://github.com/astral-sh/ty):
 
