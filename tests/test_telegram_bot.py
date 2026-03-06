@@ -1422,7 +1422,6 @@ async def test_format_activity_block_read_prefers_file_uri_path():
     rendered = TelegramBridge._format_activity_block(block, workspace=Path("/tmp/ws"))
     assert "`/home/tin/lab/telegram-acp/README.md`" in rendered
 
-
 async def test_format_activity_block_search_uses_specific_label_not_tool_call():
     block = AgentActivityBlock(kind="search", title="Searching the Web", status="in_progress")
     rendered = TelegramBridge._format_activity_block(block)
@@ -1509,6 +1508,23 @@ async def test_clean_search_query_url_only_returns_empty():
 
 async def test_normalize_search_activity_keeps_blank_text_when_title_is_generic():
     assert TelegramBridge._normalize_search_activity(title="Searching the Web", text=" ") == ("", " ")
+
+
+async def test_format_activity_block_read_normalizes_all_read_targets():
+    block = AgentActivityBlock(
+        kind="read",
+        title="Read /home/tin/lab/telegram-acp/bot.py, Read bot.py",
+        status="completed",
+    )
+    rendered = TelegramBridge._format_activity_block(block, workspace=Path("/tmp/ws"))
+    assert "`/home/tin/lab/telegram-acp/bot.py`" in rendered
+    assert "`/tmp/ws/bot.py`" in rendered
+    assert ", Read bot.py" not in rendered
+
+
+async def test_split_path_activity_targets_keeps_original_on_empty_segments():
+    raw_targets = "README.md, Read "
+    assert TelegramBridge._split_path_activity_targets(raw_targets, prefix="Read") == [raw_targets]
 
 
 async def test_format_activity_block_preserves_thinking_inline_code():
