@@ -3403,3 +3403,31 @@ async def test_edit_markdown_in_chat_convert_error_returns_false_when_edit_fails
         bot=cast(Bot, bot), chat_id=TEST_CHAT_ID, message_id=COMPACT_STATUS_MSG_ID, text="Hello"
     )
     assert result is False
+
+
+async def test_compact_stale_status_cleared_when_reply_is_none():
+    """Compact status message is deleted when the prompt cycle exits without a final reply."""
+
+    class LimitErrorCompactService(LiveActivityService):
+        async def prompt(self, *, chat_id: int, text: str, images=(), files=()):
+            if self._activity_handler is not None:
+                await self._activity_handler(
+                    chat_id,
+                    AgentActivityBlock(kind="think", title="Thinking…", status="in_progress", text=""),
+                )
+            raise AgentOutputLimitExceededError(ACP_STDIO_LIMIT_ERROR)
+
+    config = make_config(token="TOKEN", allowed_user_ids=[], workspace=".", compact_activity=True)
+    bridge = TelegramBridge(config=config, agent_service=cast(AgentService, LimitErrorCompactService()))
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+    update = make_update(chat_id=TEST_CHAT_ID, text="hello")
+    context = make_context()
+    context.bot = bot
+
+    await bridge.on_message(update, context)
+
+    assert TEST_CHAT_ID not in bridge._compact_status_msg_id
+    assert len(bot.deleted_message_ids) == 1
+    assert update.message is not None
+    assert "Agent output exceeded ACP stdio limit." in update.message.replies[-1]

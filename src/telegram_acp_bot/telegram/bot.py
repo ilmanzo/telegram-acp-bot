@@ -716,6 +716,8 @@ class TelegramBridge:
                 await self._dispatch_reply(chat_id=chat_id, update=current_update, reply=reply)
                 with bind_log_context(chat_id=chat_id, prompt_cycle_id=current_input.cycle_id):
                     logger.info("Prompt cycle completed")
+            elif self._config.compact_activity:
+                await self._clear_compact_status(chat_id)
 
             if pending is None:
                 return
