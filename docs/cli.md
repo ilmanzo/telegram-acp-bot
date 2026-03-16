@@ -63,3 +63,69 @@ The bot entrypoint is `telegram-acp-bot`.
     {term}`TELEGRAM_ALLOWED_USER_IDS`, or {term}`TELEGRAM_ALLOWED_USERNAMES`.
 - MCP behavior:
   - `telegram-acp-bot` always advertises an internal MCP stdio server (`telegram-channel`) to the ACP agent.
+
+## register-commands
+
+Register (or delete) the bot's slash commands in Telegram via `setMyCommands`.
+
+```bash
+telegram-acp-bot register-commands --telegram-token <TOKEN> [options]
+```
+
+### Options
+
+- `--telegram-token`
+  Default: {term}`TELEGRAM_BOT_TOKEN`.
+  Required if {term}`TELEGRAM_BOT_TOKEN` is not set.
+
+- `--scope`
+  BotCommandScope to target.
+  Allowed values: `default`, `all_private_chats`, `all_group_chats`, `all_chat_administrators`.
+  Default: `default` (global scope for all users).
+
+- `--language-code`
+  IETF language code for language-specific registration (e.g. `en`, `es`).
+  Omit to register for all languages.
+
+- `--dry-run`
+  Print the commands that would be registered without calling the Telegram API.
+
+- `--delete`
+  Delete registered commands for the given scope/language instead of setting them
+  (`deleteMyCommands`). Useful for cleanup flows.
+
+### Examples
+
+Register commands for all users (default scope):
+
+```bash
+telegram-acp-bot register-commands --telegram-token "$TELEGRAM_BOT_TOKEN"
+```
+
+Preview what would be registered without calling the API:
+
+```bash
+telegram-acp-bot register-commands --telegram-token "$TELEGRAM_BOT_TOKEN" --dry-run
+```
+
+Register commands only for private chats in English:
+
+```bash
+telegram-acp-bot register-commands \
+  --telegram-token "$TELEGRAM_BOT_TOKEN" \
+  --scope all_private_chats \
+  --language-code en
+```
+
+Delete all registered commands for the default scope:
+
+```bash
+telegram-acp-bot register-commands --telegram-token "$TELEGRAM_BOT_TOKEN" --delete
+```
+
+### Notes
+
+- Command definitions are sourced from the codebase constant
+  `telegram_acp_bot.telegram.bot.BOT_COMMANDS`.  Running `register-commands` is idempotent —
+  it is safe to call multiple times.
+- Exit code `0` on success; `1` on Telegram API error.

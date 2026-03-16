@@ -23,7 +23,8 @@ from telegram_acp_bot.acp_app.models import PermissionEventOutput, PermissionMod
 from telegram_acp_bot.core.session_registry import SessionRegistry
 from telegram_acp_bot.logging_context import configure_logging
 from telegram_acp_bot.mcp_channel_state import STATE_FILE_ENV, TOKEN_ENV, default_state_file
-from telegram_acp_bot.telegram.bot import RESTART_EXIT_CODE, TelegramBridge, make_config, run_polling
+from telegram_acp_bot.register_commands import add_register_commands_subparser
+from telegram_acp_bot.telegram.bot import RESTART_EXIT_CODE, BotConfig, TelegramBridge, make_config, run_polling
 
 ALLOWED_USER_IDS_ENV = "TELEGRAM_ALLOWED_USER_IDS"
 ALLOWED_USERNAMES_ENV = "TELEGRAM_ALLOWED_USERNAMES"
@@ -40,6 +41,10 @@ def get_parser() -> argparse.ArgumentParser:
     """Return the CLI argument parser."""
     parser = argparse.ArgumentParser(prog="telegram-acp-bot")
     parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {get_version()}")
+
+    subparsers = parser.add_subparsers(dest="subcommand", metavar="command")
+    add_register_commands_subparser(subparsers)
+
     parser.add_argument("--telegram-token", default=os.getenv("TELEGRAM_BOT_TOKEN", ""), help="Telegram bot token")
     parser.add_argument(
         "--agent-command",
@@ -143,11 +148,50 @@ def _resolve_allowed_users(*, parser: argparse.ArgumentParser, opts: argparse.Na
     return allowed_user_ids, allowed_usernames
 
 
+def _run_bot_loop(
+    config: BotConfig,
+    bridge: TelegramBridge,
+    restart_command_parts: list[str] | None,
+) -> int:
+    """Poll until normal exit; re-exec the process on restart requests."""
+    while True:
+        exit_code = run_polling(config, bridge)
+        if exit_code != RESTART_EXIT_CODE:
+            return exit_code
+        try:
+            if restart_command_parts is not None:
+                logging.info(
+                    "Restart requested via Telegram command. Re-execing restart command: %s",
+                    restart_command_parts,
+                )
+                os.execvp(restart_command_parts[0], restart_command_parts)
+            # TODO: Drop manual re-exec when uv can natively watch local package code and
+            # restart commands for this workflow. Tracking: astral-sh/uv#9652.
+            argv = [sys.executable, *sys.argv]
+            logging.info("Restart requested via Telegram command. Re-execing: %s", argv)
+            os.execv(sys.executable, argv)
+        except OSError:
+            logging.exception("Failed to re-exec process after /restart")
+            return 1
+
+
 def main(args: list[str] | None = None) -> int:
-    """Run the main program."""
+    """Run the main program.
+
+    Dispatches to the appropriate sub-command when one is given (e.g.
+    `register-commands`), otherwise runs the Telegram bot polling loop.
+    Sub-commands are registered via argparse subparsers and advertised in
+    `--help`.
+    """
     load_dotenv(override=False)
     parser = get_parser()
-    opts = parser.parse_args(args=args)
+    argv = list(args) if args is not None else sys.argv[1:]
+    opts = parser.parse_args(args=argv)
+
+    # Sub-command dispatch: each sub-command sets opts.func via set_defaults.
+    if hasattr(opts, "func"):
+        return opts.func(opts)
+
     log_level = os.getenv("ACP_LOG_LEVEL", "INFO").upper()
     configure_logging(
         level=getattr(logging, log_level, logging.INFO),
@@ -190,25 +234,7 @@ def main(args: list[str] | None = None) -> int:
         connect_timeout=opts.acp_connect_timeout,
     )
     bridge = TelegramBridge(config=config, agent_service=service)
-    while True:
-        exit_code = run_polling(config, bridge)
-        if exit_code != RESTART_EXIT_CODE:
-            return exit_code
-        try:
-            if restart_command_parts is not None:
-                logging.info(
-                    "Restart requested via Telegram command. Re-execing restart command: %s",
-                    restart_command_parts,
-                )
-                os.execvp(restart_command_parts[0], restart_command_parts)
-            # TODO: Drop manual re-exec when uv can natively watch local package code and
-            # restart commands for this workflow. Tracking: astral-sh/uv#9652.
-            argv = [sys.executable, *sys.argv]
-            logging.info("Restart requested via Telegram command. Re-execing: %s", argv)
-            os.execv(sys.executable, argv)
-        except OSError:
-            logging.exception("Failed to re-exec process after /restart")
-            return 1
+    return _run_bot_loop(config, bridge, restart_command_parts)
 
 
 __all__: list[str] = ["get_parser", "main"]

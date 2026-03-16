@@ -57,6 +57,17 @@ MAX_RESTART_ARGS = 2
 RESUME_KEYBOARD_MAX_ROWS = 10
 RESTART_EXIT_CODE = 75
 TELEGRAM_MAX_UTF16_MESSAGE_LENGTH = 4096
+BOT_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("start", "Start or resume in the default workspace"),
+    ("new", "Create a new agent session [workspace]"),
+    ("resume", "Resume a previous session [N|workspace]"),
+    ("session", "Show the active session workspace"),
+    ("cancel", "Cancel the current agent operation"),
+    ("stop", "Stop the current session"),
+    ("clear", "Clear the current session"),
+    ("restart", "Restart the bot [N [workspace]]"),
+    ("help", "Show available commands"),
+)
 logger = logging.getLogger(__name__)
 KIND_LABELS = {
     "think": "💡 Thinking",
