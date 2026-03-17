@@ -70,6 +70,19 @@ SEARCH_LABEL_WEB = "🌐 Searching web"
 SEARCH_LABEL_LOCAL = "🔎 Querying project"
 SEARCH_LABEL_NEUTRAL = "🔎 Querying"
 
+# Plain-text labels used in compact mode status messages (no emoji in text body;
+# emoji appear only as Telegram reactions on the user's original message).
+KIND_LABELS_PLAIN = {
+    "think": "Thinking",
+    "execute": "Running",
+    "read": "Reading",
+    "edit": "Editing",
+    "write": "Writing",
+}
+SEARCH_LABEL_WEB_PLAIN = "Searching web"
+SEARCH_LABEL_LOCAL_PLAIN = "Querying project"
+SEARCH_LABEL_NEUTRAL_PLAIN = "Querying"
+
 # Reactions used on the user's original message while the agent is active in compact mode.
 # Limited to the emoji subset supported by Telegram Bot API setMessageReaction.
 KIND_REACTIONS: dict[str, str] = {
@@ -456,7 +469,7 @@ class TelegramBridge:
             return
 
         if self._config.compact_activity:
-            label = TelegramBridge._activity_label(block)
+            label = TelegramBridge._compact_activity_label(block)
             # Acquire per-chat lock to prevent concurrent sends from creating multiple
             # status messages when the agent fires several events before the first
             # send_message call completes.
@@ -1255,6 +1268,22 @@ class TelegramBridge:
         if block.kind == "search":
             return SEARCH_REACTION
         return KIND_REACTIONS.get(block.kind, "⚡")
+
+    @staticmethod
+    def _compact_activity_label(block: AgentActivityBlock) -> str:
+        """Return a plain-text (no emoji) label for the compact status message.
+
+        Emoji indicators appear only as Telegram reactions on the user's original
+        message, never embedded in the status message body.
+        """
+        if block.kind != "search":
+            return KIND_LABELS_PLAIN.get(block.kind, "Working")
+        source = TelegramBridge._search_source(block)
+        if source == "web":
+            return SEARCH_LABEL_WEB_PLAIN
+        if source == "local":
+            return SEARCH_LABEL_LOCAL_PLAIN
+        return SEARCH_LABEL_NEUTRAL_PLAIN
 
     @staticmethod
     def _search_source(block: AgentActivityBlock) -> str | None:

@@ -3139,9 +3139,9 @@ async def test_compact_on_activity_event_sends_initial_status_message():
 
     assert len(bot.sent_messages) == 1
     status_text = cast(str, bot.sent_messages[0]["text"])
-    assert "💡 Thinking" in status_text
-    # No leading ⏳ prefix; dots are appended for the progress indicator.
-    assert not status_text.startswith("⏳")
+    # Plain text label — no emoji in the message body.
+    assert "Thinking" in status_text
+    assert "💡" not in status_text
     assert "." in status_text
     assert TEST_CHAT_ID in bridge._compact_status_msg_id
 
@@ -3158,7 +3158,10 @@ async def test_compact_on_activity_event_edits_existing_status_message():
     assert len(bot.sent_messages) == 0
     assert len(bot.edited_messages) == 1
     assert bot.edited_messages[0]["message_id"] == COMPACT_STATUS_MSG_ID
-    assert "⚙️ Running" in cast(str, bot.edited_messages[0]["text"])
+    edited_text = cast(str, bot.edited_messages[0]["text"])
+    # Plain text label — no emoji in the message body.
+    assert "Running" in edited_text
+    assert "⚙️" not in edited_text
 
 
 async def test_compact_on_activity_event_send_failure_is_silent():
@@ -3328,9 +3331,10 @@ async def test_compact_live_activity_full_flow():
     assert update.message is not None
     assert update.message.replies == []
     assert len(bot.sent_messages) == 1
-    # Status text: label + dots (no leading ⏳).
+    # Status text: plain label + dots (no emoji in message body).
     status_text = cast(str, bot.sent_messages[0]["text"])
-    assert "💡 Thinking" in status_text
+    assert "Thinking" in status_text
+    assert "💡" not in status_text
     assert not status_text.startswith("⏳")
     assert len(bot.edited_messages) == 1
     assert "Final response." in cast(str, bot.edited_messages[0]["text"])
