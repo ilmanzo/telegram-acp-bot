@@ -63,6 +63,9 @@ ACP_ACTIVITY_MODE
   `verbose` (default) emits each agent event as its own message.
   `compact` collapses all events into a single in-place status message
   that is replaced by the final answer when the agent responds.
+  While work is in progress, that same compact message keeps the normal
+  activity emoji in the message text (for example `⚙️`, `🌐`, `📖`) and
+  rotates the trailing dots to show progress.
   Maps to `--activity-mode`.
 
 ACP_TELEGRAM_CHANNEL_ALLOW_PATH
