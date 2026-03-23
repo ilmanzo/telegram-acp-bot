@@ -69,6 +69,7 @@ SEARCH_LABEL_WEB = "🌐 Searching web"
 SEARCH_LABEL_LOCAL = "🔎 Querying project"
 SEARCH_LABEL_NEUTRAL = "🔎 Querying"
 
+
 @dataclass(slots=True, frozen=True)
 class BotConfig:
     """Runtime settings for Telegram transport."""
@@ -1265,6 +1266,7 @@ class TelegramBridge:
             return SEARCH_LABEL_LOCAL
         return SEARCH_LABEL_NEUTRAL
 
+    @staticmethod
     def _search_source(block: AgentActivityBlock) -> str | None:
         content = f"{block.title}\n{block.text}".lower()
         if any(token in content for token in ("http://", "https://", "url:", "web search", "internet")):
