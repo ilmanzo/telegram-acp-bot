@@ -89,6 +89,7 @@ class BotConfig:
     allowed_user_ids: set[int]
     allowed_usernames: set[str]
     default_workspace: Path
+    compact_activity: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -196,6 +197,13 @@ class TelegramBridge:
         self._pending_resume_choices_by_chat: dict[int, tuple[ResumableSession, ...]] = {}
         self._chat_prompt_locks: dict[int, asyncio.Lock] = {}
         self._pending_prompts_by_chat: dict[int, _PendingPrompt] = {}
+        self._compact_status_msg_id: dict[int, int] = {}
+        # Per-chat lock to prevent concurrent sends from creating multiple status messages.
+        self._compact_status_locks: dict[int, asyncio.Lock] = {}
+        # Current compact status label per chat (for example "⚙️ Running").
+        self._compact_status_label: dict[int, str] = {}
+        # Background animation task per chat for `. .. ...` progress.
+        self._compact_status_tasks: dict[int, asyncio.Task[None]] = {}
         if hasattr(self._agent_service, "set_permission_request_handler"):
             self._agent_service.set_permission_request_handler(self.on_permission_request)
         if hasattr(self._agent_service, "set_activity_event_handler"):
@@ -434,16 +442,63 @@ class TelegramBridge:
 
         keyboard = self._permission_keyboard(request)
         message = TelegramBridge._format_permission_request_text(request.tool_title)
+        if self._config.compact_activity:
+            lock = self._compact_status_locks.setdefault(request.chat_id, asyncio.Lock())
+            async with lock:
+                status_msg_id = self._compact_status_msg_id.get(request.chat_id)
+                self._cancel_compact_animation(request.chat_id)
+                if status_msg_id is not None:
+                    edited = await TelegramBridge._edit_markdown_in_chat(
+                        bot=self._app.bot,
+                        chat_id=request.chat_id,
+                        message_id=status_msg_id,
+                        text=message,
+                        reply_markup=keyboard,
+                    )
+                    if edited:
+                        return
+                    with suppress(TelegramError):
+                        await self._app.bot.delete_message(chat_id=request.chat_id, message_id=status_msg_id)
+
+                sent = await TelegramBridge._send_markdown_to_chat(
+                    bot=self._app.bot,
+                    chat_id=request.chat_id,
+                    text=message,
+                    reply_markup=keyboard,
+                )
+                if sent is not None:
+                    self._compact_status_msg_id[request.chat_id] = sent.message_id
+            return
+
         await TelegramBridge._send_markdown_to_chat(
-            bot=self._app.bot,
-            chat_id=request.chat_id,
-            text=message,
-            reply_markup=keyboard,
+            bot=self._app.bot, chat_id=request.chat_id, text=message, reply_markup=keyboard
         )
 
     async def on_activity_event(self, chat_id: int, block: AgentActivityBlock) -> None:
         app = self._app
         if app is None:
+            return
+
+        if self._config.compact_activity:
+            label = TelegramBridge._activity_label(block)
+            # Acquire per-chat lock to prevent concurrent sends from creating multiple
+            # status messages when the agent fires several events before the first
+            # send_message call completes.
+            lock = self._compact_status_locks.setdefault(chat_id, asyncio.Lock())
+            async with lock:
+                self._compact_status_label[chat_id] = label
+                status_text = f"{label}."
+                existing_msg_id = self._compact_status_msg_id.get(chat_id)
+                if existing_msg_id is None:
+                    with suppress(TelegramError):
+                        msg = await app.bot.send_message(chat_id=chat_id, text=status_text)
+                        existing_msg_id = msg.message_id
+                        self._compact_status_msg_id[chat_id] = existing_msg_id
+                else:
+                    with suppress(TelegramError):
+                        await app.bot.edit_message_text(chat_id=chat_id, message_id=existing_msg_id, text=status_text)
+                if existing_msg_id is not None:
+                    self._ensure_compact_animation(chat_id=chat_id, message_id=existing_msg_id)
             return
 
         workspace = self._activity_workspace(chat_id=chat_id)
@@ -710,6 +765,8 @@ class TelegramBridge:
                 await self._dispatch_reply(chat_id=chat_id, update=current_update, reply=reply)
                 with bind_log_context(chat_id=chat_id, prompt_cycle_id=current_input.cycle_id):
                     logger.info("Prompt cycle completed")
+            elif self._config.compact_activity:
+                await self._clear_compact_status(chat_id)
 
             if pending is None:
                 return
@@ -726,7 +783,77 @@ class TelegramBridge:
                 await self._reply_activity_block(update, block, workspace=workspace)
         await self._send_attachments(update, reply)
         if reply.text.strip():
-            await self._reply_agent(update, reply.text)
+            if self._config.compact_activity and self._app is not None:
+                await self._finalize_compact_reply(chat_id=chat_id, update=update, text=reply.text)
+            else:
+                await self._reply_agent(update, reply.text)
+        elif self._config.compact_activity and self._app is not None:
+            await self._clear_compact_status(chat_id)
+
+    async def _finalize_compact_reply(self, *, chat_id: int, update: Update, text: str) -> None:
+        """Replace the compact in-progress status message with the final reply.
+
+        Edits the status message in place when possible. Falls back to deleting it
+        and delivering the reply as a new message when editing is not possible
+        (e.g. reply is too long, Telegram API error).
+        """
+        app = self._app
+        status_msg_id = self._compact_status_msg_id.pop(chat_id, None)
+        self._cancel_compact_animation(chat_id)
+        self._compact_status_label.pop(chat_id, None)
+        if status_msg_id is not None and app is not None:
+            success = await TelegramBridge._edit_markdown_in_chat(
+                bot=app.bot, chat_id=chat_id, message_id=status_msg_id, text=text
+            )
+            if success:
+                return
+            with suppress(TelegramError):
+                await app.bot.delete_message(chat_id=chat_id, message_id=status_msg_id)
+        await self._reply_agent(update, text)
+
+    async def _clear_compact_status(self, chat_id: int) -> None:
+        """Delete the in-progress compact status message if one exists."""
+        app = self._app
+        status_msg_id = self._compact_status_msg_id.pop(chat_id, None)
+        self._cancel_compact_animation(chat_id)
+        self._compact_status_label.pop(chat_id, None)
+        if status_msg_id is None or app is None:
+            return
+        with suppress(TelegramError):
+            await app.bot.delete_message(chat_id=chat_id, message_id=status_msg_id)
+
+    def _cancel_compact_animation(self, chat_id: int) -> None:
+        task = self._compact_status_tasks.pop(chat_id, None)
+        if task is not None:
+            task.cancel()
+
+    def _ensure_compact_animation(self, *, chat_id: int, message_id: int) -> None:
+        task = self._compact_status_tasks.get(chat_id)
+        if task is not None and not task.done():
+            return
+        self._compact_status_tasks[chat_id] = asyncio.create_task(
+            self._animate_compact_status(chat_id=chat_id, message_id=message_id)
+        )
+
+    async def _animate_compact_status(self, *, chat_id: int, message_id: int) -> None:
+        """Rotate `. .. ...` on the active compact status message until cancelled."""
+        app = self._app
+        if app is None:
+            return
+        dot_count = 1
+        while True:
+            await asyncio.sleep(0.6)
+            label = self._compact_status_label.get(chat_id)
+            current_msg_id = self._compact_status_msg_id.get(chat_id)
+            if label is None or current_msg_id != message_id:
+                return
+            dot_count = dot_count % 3 + 1
+            with suppress(TelegramError):
+                await app.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=f"{label}{'.' * dot_count}",
+                )
 
     async def _start_implicit_session(self, *, update: Update, chat_id: int) -> bool:
         workspace = self._config.default_workspace
@@ -1317,35 +1444,96 @@ class TelegramBridge:
         chat_id: int,
         text: str,
         reply_markup: InlineKeyboardMarkup | None = None,
-    ) -> None:
+    ) -> Message | None:
         try:
             rendered_text, rendered_entities = convert(text)
             chunks = split_entities(rendered_text, rendered_entities, max_utf16_len=TELEGRAM_MAX_UTF16_MESSAGE_LENGTH)
+            first_message: Message | None = None
             for index, (chunk_text, chunk_entities) in enumerate(chunks):
                 current_reply_markup = reply_markup if index == 0 else None
                 if chunk_entities:
                     entities = [TelegramBridge._to_telegram_entity(entity) for entity in chunk_entities]
                     try:
-                        await bot.send_message(
+                        sent_message = await bot.send_message(
                             chat_id=chat_id,
                             text=chunk_text,
                             entities=entities,
                             reply_markup=current_reply_markup,
                         )
                     except TelegramError:
-                        await bot.send_message(
+                        sent_message = await bot.send_message(
                             chat_id=chat_id,
                             text=chunk_text,
                             reply_markup=current_reply_markup,
                         )
                 else:
-                    await bot.send_message(
+                    sent_message = await bot.send_message(
                         chat_id=chat_id,
                         text=chunk_text,
                         reply_markup=current_reply_markup,
                     )
+                if first_message is None:
+                    first_message = sent_message
         except (RuntimeError, ValueError, TypeError):
-            await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+            return await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+        else:
+            return first_message
+
+    @staticmethod
+    async def _edit_markdown_in_chat(
+        *,
+        bot: Bot,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> bool:
+        """Edit an existing chat message in place with markdown content.
+
+        Returns `True` when the message was successfully updated, `False` when
+        editing is not possible (API error, or content spans multiple chunks).
+        Multi-chunk content signals to the caller to fall back to normal delivery.
+        """
+        try:
+            rendered_text, rendered_entities = convert(text)
+            chunks = split_entities(rendered_text, rendered_entities, max_utf16_len=TELEGRAM_MAX_UTF16_MESSAGE_LENGTH)
+        except (RuntimeError, ValueError, TypeError):
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup
+                )
+            except TelegramError:
+                return False
+            else:
+                return True
+        if len(chunks) != 1:
+            return False
+        chunk_text, chunk_entities = chunks[0]
+        if chunk_entities:
+            entities = [TelegramBridge._to_telegram_entity(entity) for entity in chunk_entities]
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=chunk_text,
+                    entities=entities,
+                    reply_markup=reply_markup,
+                )
+            except TelegramError:
+                pass
+            else:
+                return True
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=chunk_text,
+                reply_markup=reply_markup,
+            )
+        except TelegramError:
+            return False
+        else:
+            return True
 
     def _activity_workspace(self, *, chat_id: int) -> Path:
         return self._agent_service.get_workspace(chat_id=chat_id) or self._config.default_workspace
@@ -1398,6 +1586,7 @@ def make_config(
     allowed_user_ids: list[int],
     workspace: str,
     allowed_usernames: list[str] | None = None,
+    compact_activity: bool = False,
 ) -> BotConfig:
     normalized_usernames = {
         username.lstrip("@").strip().lower() for username in (allowed_usernames or []) if username.strip()
@@ -1407,4 +1596,5 @@ def make_config(
         allowed_user_ids=set(allowed_user_ids),
         allowed_usernames=normalized_usernames,
         default_workspace=Path(workspace).expanduser(),
+        compact_activity=compact_activity,
     )
