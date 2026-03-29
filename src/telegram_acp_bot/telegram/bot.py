@@ -1420,7 +1420,7 @@ class TelegramBridge:
                     logger.exception("Failed to send busy notification for chat_id=%s", chat_id)
 
     async def _clear_busy_button(self, pending: _PendingPrompt | None) -> None:
-        """Remove the *Send now* button when the queued prompt is about to be processed."""
+        """Update the busy notification to `BUSY_SENT_TEXT` and remove the *Send now* button when the queued prompt is about to be processed."""
         if pending is None or pending.notify_msg_id is None or self._app is None:
             return
         with suppress(TelegramError):
