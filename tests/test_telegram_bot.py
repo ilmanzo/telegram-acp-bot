@@ -14,6 +14,7 @@ from telegram.ext import AIORateLimiter, Application
 
 from telegram_acp_bot.acp_app.echo_service import EchoAgentService
 from telegram_acp_bot.acp_app.models import (
+    ActivityMode,
     AgentActivityBlock,
     AgentOutputLimitExceededError,
     AgentReply,
@@ -2829,6 +2830,31 @@ class BlockingService:
         self._prompt_gate.set()
 
 
+class BlockingActivityService(BlockingService):
+    """Blocking service that emits a visible activity event before waiting."""
+
+    def __init__(self, *, kind: str = "think", title: str = "Thinking") -> None:
+        super().__init__()
+        self._activity_handler: Callable[[int, AgentActivityBlock], Awaitable[None]] | None = None
+        self._kind = kind
+        self._title = title
+
+    async def prompt(self, *, chat_id: int, text: str, images=(), files=()) -> AgentReply:
+        del images, files
+        self.prompts.append(text)
+        if self._activity_handler is not None:
+            await self._activity_handler(
+                chat_id,
+                AgentActivityBlock(kind=self._kind, title=self._title, status="in_progress", text=""),
+            )
+        self._prompt_started.set()
+        await self._prompt_gate.wait()
+        return AgentReply(text=f"done:{text}")
+
+    def set_activity_event_handler(self, handler):
+        self._activity_handler = handler
+
+
 class FailingCancelService:
     def __init__(self) -> None:
         self._workspace: Path | None = Path(".")
@@ -2940,6 +2966,113 @@ async def test_on_message_queued_runs_automatically_and_button_is_removed():
     assert "done:second" in update_two.message.replies[-1]
 
 
+async def test_auto_drain_keeps_send_now_button_until_reply_dispatch_finishes():
+    service = BlockingService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace=".", activity_mode="verbose"),
+        agent_service=cast(AgentService, service),
+    )
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+
+    update_one = make_update(chat_id=TEST_CHAT_ID, text="first")
+    update_two = make_update(chat_id=TEST_CHAT_ID, text="second")
+    context = make_context(application=SimpleNamespace(bot=bot))
+
+    dispatch_entered = asyncio.Event()
+    release_dispatch = asyncio.Event()
+    original_dispatch_reply = bridge._dispatch_reply
+    dispatch_calls = 0
+
+    async def delayed_dispatch_reply(*, chat_id: int, update: Update, reply: AgentReply) -> None:
+        nonlocal dispatch_calls
+        dispatch_calls += 1
+        dispatch_entered.set()
+        if dispatch_calls == 1:
+            assert not any(e.get("message_id") == 1 for e in bot.edited_reply_markups)
+        await release_dispatch.wait()
+        await original_dispatch_reply(chat_id=chat_id, update=update, reply=reply)
+
+    bridge._dispatch_reply = delayed_dispatch_reply  # type: ignore[method-assign]
+
+    task_one = asyncio.create_task(bridge.on_message(update_one, context))
+    await service._prompt_started.wait()
+    await bridge.on_message(update_two, context)
+
+    assert bot.sent_messages[0]["reply_markup"] is not None
+
+    service.release()
+    await dispatch_entered.wait()
+
+    assert not any(e.get("message_id") == 1 for e in bot.edited_reply_markups)
+
+    release_dispatch.set()
+    await task_one
+
+    assert any(e.get("message_id") == 1 for e in bot.edited_reply_markups)
+
+
+async def test_on_busy_callback_updates_notification_while_prompt_is_already_dequeued():
+    service = BlockingService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace=".", activity_mode="verbose"),
+        agent_service=cast(AgentService, service),
+    )
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+
+    update_one = make_update(chat_id=TEST_CHAT_ID, text="first")
+    update_two = make_update(chat_id=TEST_CHAT_ID, text="second")
+    context = make_context(application=SimpleNamespace(bot=bot))
+
+    dispatch_entered = asyncio.Event()
+    release_dispatch = asyncio.Event()
+    original_dispatch_reply = bridge._dispatch_reply
+
+    async def delayed_dispatch_reply(*, chat_id: int, update: Update, reply: AgentReply) -> None:
+        dispatch_entered.set()
+        await release_dispatch.wait()
+        await original_dispatch_reply(chat_id=chat_id, update=update, reply=reply)
+
+    bridge._dispatch_reply = delayed_dispatch_reply  # type: ignore[method-assign]
+
+    task_one = asyncio.create_task(bridge.on_message(update_one, context))
+    await service._prompt_started.wait()
+    await bridge.on_message(update_two, context)
+
+    markup = cast(InlineKeyboardMarkup, bot.sent_messages[0]["reply_markup"])
+    token = cast(str, markup.inline_keyboard[0][0].callback_data).split("|", 1)[1]
+    notify_msg_id = 1
+
+    service.release()
+    await dispatch_entered.wait()
+
+    assert TEST_CHAT_ID not in bridge._pending_prompts_by_chat
+    assert bridge._dequeued_prompts_by_chat[TEST_CHAT_ID].token == token
+
+    callback = DummyCallbackQuery(f"{BUSY_CALLBACK_PREFIX}|{token}")
+    update_cb = cast(
+        Update,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=TEST_CHAT_ID),
+            callback_query=callback,
+            message=None,
+        ),
+    )
+
+    await bridge.on_busy_callback(update_cb, make_context())
+
+    assert callback.answers[-1] == "✅ Sent."
+    assert not service.cancelled
+    assert any(
+        edit.get("message_id") == notify_msg_id and edit.get("text") == "✅ Sent." for edit in bot.edited_messages
+    )
+
+    release_dispatch.set()
+    await task_one
+
+
 async def test_on_busy_callback_send_now_cancels_and_queued_runs():
     service = BlockingService()
     config = make_config(token="TOKEN", allowed_user_ids=[], workspace=".")
@@ -2974,7 +3107,7 @@ async def test_on_busy_callback_send_now_cancels_and_queued_runs():
     await bridge.on_busy_callback(update_cb, make_context())
 
     assert callback.answers[-1] == "✅ Sent."
-    assert callback.edited_text == "✅ Sent."
+    assert any(edit.get("text") == "✅ Sent." for edit in bot.edited_messages)
     assert service.cancelled
 
     await task_one
@@ -3332,6 +3465,99 @@ async def test_on_busy_callback_cancel_failure_answers_safely():
     )
     await bridge.on_busy_callback(update_cb, make_context())
     assert callback.answers[-1] == "Cancel failed."
+
+
+@pytest.mark.parametrize(("mode", "expect_compact_reply"), [("normal", True), ("compact", False), ("verbose", True)])
+async def test_busy_queue_notification_is_visible_with_activity_in_all_modes(mode: str, expect_compact_reply: bool):
+    service = BlockingActivityService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace=".", activity_mode=cast(ActivityMode, mode)),
+        agent_service=cast(AgentService, service),
+    )
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+
+    update_one = make_update(chat_id=TEST_CHAT_ID, text="first", message_id=11)
+    update_two = make_update(chat_id=TEST_CHAT_ID, text="second", message_id=QUEUED_MESSAGE_ID)
+    context = make_context(application=SimpleNamespace(bot=bot))
+
+    task_one = asyncio.create_task(bridge.on_message(update_one, context))
+    await service._prompt_started.wait()
+    await bridge.on_message(update_two, context)
+
+    queue_payload = next(payload for payload in bot.sent_messages if "queued" in cast(str, payload["text"]).lower())
+    assert queue_payload["chat_id"] == TEST_CHAT_ID
+    assert queue_payload["reply_to_message_id"] == QUEUED_MESSAGE_ID
+    assert queue_payload["allow_sending_without_reply"] is True
+    markup = cast(InlineKeyboardMarkup, queue_payload["reply_markup"])
+    assert markup is not None
+    assert markup.inline_keyboard[0][0].text == "Send now"
+
+    service.release()
+    await task_one
+
+    assert update_one.message is not None
+    assert update_two.message is not None
+    if expect_compact_reply:
+        assert "done:first" in update_one.message.replies[-1]
+        assert "done:second" in update_two.message.replies[-1]
+    else:
+        assert update_one.message.replies == []
+        assert update_two.message.replies == []
+        assert any("done:second" in cast(str, item["text"]) for item in bot.edited_messages)
+
+
+@pytest.mark.parametrize("mode", ["normal", "compact", "verbose"])
+async def test_on_busy_callback_updates_stored_notification_when_query_edit_fails(mode: str):
+    service = BlockingActivityService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace=".", activity_mode=cast(ActivityMode, mode)),
+        agent_service=cast(AgentService, service),
+    )
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+
+    update_one = make_update(chat_id=TEST_CHAT_ID, text="first", message_id=11)
+    update_two = make_update(chat_id=TEST_CHAT_ID, text="second", message_id=QUEUED_MESSAGE_ID)
+    context = make_context(application=SimpleNamespace(bot=bot))
+
+    task_one = asyncio.create_task(bridge.on_message(update_one, context))
+    await service._prompt_started.wait()
+    await bridge.on_message(update_two, context)
+
+    pending = bridge._pending_prompts_by_chat[TEST_CHAT_ID]
+    token = pending.token
+    notify_msg_id = pending.notify_msg_id
+    assert notify_msg_id is not None
+
+    class FailingBusyCallbackQuery(DummyCallbackQuery):
+        async def edit_message_text(self, text: str, **kwargs: object) -> None:
+            del text, kwargs
+            raise MarkdownFailureError
+
+        async def edit_message_reply_markup(self, *, reply_markup: object | None = None) -> None:
+            del reply_markup
+            raise MarkdownFailureError
+
+    callback = FailingBusyCallbackQuery(f"{BUSY_CALLBACK_PREFIX}|{token}")
+    update_cb = cast(
+        Update,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=TEST_CHAT_ID),
+            callback_query=callback,
+            message=None,
+        ),
+    )
+
+    await bridge.on_busy_callback(update_cb, make_context())
+
+    assert callback.answers[-1] == "✅ Sent."
+    assert any(
+        edit.get("message_id") == notify_msg_id and edit.get("text") == "✅ Sent." for edit in bot.edited_messages
+    )
+
+    await task_one
 
 
 async def test_log_text_preview_compacts_and_truncates():
