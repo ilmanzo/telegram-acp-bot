@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from telegram import Bot, InlineKeyboardMarkup, MessageEntity, Update
+from telegram import Bot, CallbackQuery, InlineKeyboardMarkup, MessageEntity, Update
 from telegram.error import TelegramError
 from telegram.ext import AIORateLimiter, Application
 
@@ -3329,7 +3329,7 @@ async def test_on_busy_callback_stale_after_auto_drain():
     assert callback.answers[-1] == "Already sent."
 
 
-async def test_dispatch_reply_failure_clears_dequeued_prompt_state():
+async def test_dispatch_reply_failure_clears_dequeued_prompt_state(mocker):
     service = BlockingService()
     bridge = TelegramBridge(
         config=make_config(token="TOKEN", allowed_user_ids=[], workspace=".", activity_mode="verbose"),
@@ -3353,7 +3353,7 @@ async def test_dispatch_reply_failure_clears_dequeued_prompt_state():
         del chat_id, update, reply
         raise MarkdownFailureError
 
-    bridge._dispatch_reply = failing_dispatch_reply  # type: ignore[method-assign]
+    mocker.patch.object(bridge, "_dispatch_reply", side_effect=failing_dispatch_reply)
 
     service.release()
     with pytest.raises(MarkdownFailureError):
@@ -3738,7 +3738,7 @@ async def test_update_busy_notification_query_fallback_clears_reply_markup():
     await bridge._update_busy_notification(
         chat_id=TEST_CHAT_ID,
         pending=pending,
-        query=callback,
+        query=cast(CallbackQuery, callback),
         text=BUSY_SENT_TEXT,
     )
 
