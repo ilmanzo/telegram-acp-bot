@@ -530,6 +530,36 @@ async def test_mode_command_sets_verbose_activity_mode():
     assert bridge._activity_mode(chat_id=TEST_CHAT_ID) == "verbose"
 
 
+async def test_mode_command_reports_current_mode_without_args():
+    bridge = make_bridge()
+    update = make_update(with_message=True)
+
+    await bridge.mode(update, make_context())
+
+    assert update.message is not None
+    assert update.message.replies == ["Current activity mode: normal\nUsage: /mode normal, compact, or verbose"]
+
+
+async def test_mode_command_rejects_invalid_mode():
+    bridge = make_bridge()
+    update = make_update(with_message=True)
+
+    await bridge.mode(update, make_context(args=["loud"]))
+
+    assert update.message is not None
+    assert update.message.replies == ["Usage: /mode normal, compact, or verbose"]
+
+
+async def test_mode_command_stops_when_access_is_denied():
+    bridge = make_bridge(allowed_ids={99})
+    update = make_update(with_message=True)
+
+    await bridge.mode(update, make_context(args=["verbose"]))
+
+    assert update.message is not None
+    assert update.message.replies == ["Access denied for this bot."]
+
+
 async def test_start_allows_user_by_username_allowlist():
     config = make_config(token="TOKEN", allowed_user_ids=[], allowed_usernames=["@Alice"], workspace=".")
     bridge = TelegramBridge(config=config, agent_service=EchoAgentService(SessionRegistry()))
@@ -540,6 +570,121 @@ async def test_start_allows_user_by_username_allowlist():
 
     assert update.message is not None
     assert "Send a message to start in the default workspace" in update.message.replies[0]
+
+
+async def test_activity_mode_base_handler_defaults():
+    bridge = make_bridge()
+    handler = bot_module._ActivityModeHandler(bridge)
+
+    await handler.on_permission_request(
+        request=PermissionRequest(
+            chat_id=TEST_CHAT_ID,
+            request_id="req",
+            tool_title="Run pwd",
+            tool_call_id="call-base",
+            available_actions=("once",),
+        ),
+        message="Permission request",
+        keyboard=InlineKeyboardMarkup([]),
+    )
+    assert await handler.finalize_reply(chat_id=TEST_CHAT_ID, update=cast(Update, make_update()), text="hello") is False
+    await handler.handle_empty_reply(chat_id=TEST_CHAT_ID)
+    await handler.clear_chat_state(chat_id=TEST_CHAT_ID)
+
+    with pytest.raises(NotImplementedError):
+        await handler.on_activity_event(
+            chat_id=TEST_CHAT_ID,
+            block=AgentActivityBlock(kind="think", title="", status="in_progress", text="x"),
+        )
+
+
+async def test_normal_activity_handler_skips_reply_and_duplicate_stream_updates():
+    bridge = make_bridge()
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+    handler = bot_module._NormalActivityModeHandler(bridge)
+
+    await handler.on_activity_event(
+        chat_id=TEST_CHAT_ID,
+        block=AgentActivityBlock(kind="reply", title="", status="in_progress", text="preview", activity_id="reply"),
+    )
+    await handler.on_activity_event(
+        chat_id=TEST_CHAT_ID,
+        block=AgentActivityBlock(kind="execute", title="Run", status="in_progress", text="", activity_id="dup"),
+    )
+    await handler.on_activity_event(
+        chat_id=TEST_CHAT_ID,
+        block=AgentActivityBlock(kind="execute", title="Run", status="in_progress", text="", activity_id="dup"),
+    )
+    await handler.on_activity_event(
+        chat_id=TEST_CHAT_ID,
+        block=AgentActivityBlock(kind="execute", title="Run", status="completed", text="", activity_id="dup"),
+    )
+
+    assert len(bot.sent_messages) == EXPECTED_REPEATED_ACTIVITY_MESSAGES
+
+
+async def test_compact_permission_request_replaces_status_message_when_edit_fails():
+
+    class EditFailingBot(DummyBot):
+        async def edit_message_text(self, **kwargs: object) -> None:
+            raise MarkdownFailureError
+
+    bridge = make_compact_bridge()
+    bot = EditFailingBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+    bridge._compact_status_msg_id[TEST_CHAT_ID] = COMPACT_STATUS_MSG_ID
+
+    await bridge._activity_handler(chat_id=TEST_CHAT_ID).on_permission_request(
+        request=PermissionRequest(
+            chat_id=TEST_CHAT_ID,
+            request_id="req-compact",
+            tool_title="Run pwd",
+            tool_call_id="call-compact",
+            available_actions=("once",),
+        ),
+        message="Permission request",
+        keyboard=InlineKeyboardMarkup([]),
+    )
+
+    assert bot.deleted_message_ids == [(TEST_CHAT_ID, COMPACT_STATUS_MSG_ID)]
+    assert len(bot.sent_messages) == 1
+    assert bridge._compact_status_msg_id[TEST_CHAT_ID] == 1
+
+
+async def test_compact_and_verbose_handlers_return_early_without_app_or_reply_updates():
+    compact_handler = make_compact_bridge()._activity_handler(chat_id=TEST_CHAT_ID)
+    verbose_handler = make_verbose_bridge()._activity_handler(chat_id=TEST_CHAT_ID)
+
+    await compact_handler.on_activity_event(
+        chat_id=TEST_CHAT_ID,
+        block=AgentActivityBlock(kind="reply", title="", status="in_progress", text="preview", activity_id="reply"),
+    )
+    await verbose_handler.on_activity_event(
+        chat_id=TEST_CHAT_ID,
+        block=AgentActivityBlock(kind="think", title="Thinking", status="in_progress", text="", activity_id="t1"),
+    )
+
+    assert (
+        await verbose_handler.finalize_reply(chat_id=TEST_CHAT_ID, update=cast(Update, make_update()), text="hello")
+        is False
+    )
+
+
+async def test_compact_permission_request_returns_early_without_app():
+    handler = make_compact_bridge()._activity_handler(chat_id=TEST_CHAT_ID)
+
+    await handler.on_permission_request(
+        request=PermissionRequest(
+            chat_id=TEST_CHAT_ID,
+            request_id="req-no-app",
+            tool_title="Run pwd",
+            tool_call_id="call-no-app",
+            available_actions=("once",),
+        ),
+        message="Permission request",
+        keyboard=InlineKeyboardMarkup([]),
+    )
 
 
 async def test_restart_requests_app_stop():
@@ -1711,6 +1856,16 @@ async def test_format_activity_block_search_uses_project_label_for_file_uri():
     )
     rendered = TelegramBridge._format_activity_block(block)
     assert "*🔎 Querying project*" in rendered
+
+
+async def test_format_activity_block_reply_and_fallback_helpers():
+    block = AgentActivityBlock(kind="reply", title="ignored", status="completed", text="final")
+
+    assert TelegramBridge._format_activity_block(block) == "final"
+    assert TelegramBridge._activity_label(block) == "✍️ Replying"
+    assert TelegramBridge._activity_id(
+        AgentActivityBlock(kind="think", title="Title", status="completed", text="")
+    ) == ("think:Title")
 
 
 async def test_format_permission_tool_title_empty_returns_empty():
@@ -3574,6 +3729,45 @@ async def test_verbose_final_reply_keeps_markdown_when_final_matches_streamed_pr
     assert update.message.replies == []
 
 
+async def test_verbose_finalize_reply_handles_empty_text_and_empty_chunks(mocker):
+    bridge = make_verbose_bridge()
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+    handler = cast(bot_module._VerboseActivityModeHandler, bridge._activity_handler(chat_id=TEST_CHAT_ID))
+    handler._store_message(
+        chat_id=TEST_CHAT_ID,
+        slot_key="activity:reply",
+        message=bot_module._VerboseActivityMessage(
+            activity_id="reply",
+            kind="reply",
+            title="",
+            message_id=1,
+            source_text="preview",
+        ),
+    )
+
+    assert await handler.finalize_reply(chat_id=TEST_CHAT_ID, update=cast(Update, make_update()), text="") is True
+
+    handler._store_message(
+        chat_id=TEST_CHAT_ID,
+        slot_key="activity:reply",
+        message=bot_module._VerboseActivityMessage(
+            activity_id="reply",
+            kind="reply",
+            title="",
+            message_id=2,
+            source_text="preview",
+        ),
+    )
+    mocker.patch.object(TelegramBridge, "_render_markdown_chunks", return_value=[])
+    assert (
+        await handler.finalize_reply(
+            chat_id=TEST_CHAT_ID, update=cast(Update, make_update()), text="still empty chunks"
+        )
+        is True
+    )
+
+
 async def test_verbose_final_reply_deletes_preview_when_final_edit_fails():
 
     class StreamingReplyService(LiveActivityService):
@@ -3653,6 +3847,87 @@ async def test_verbose_reset_clears_older_pending_preview_before_flush(mocker):
     assert all(cast(str, item.get("text", "")) != "one two" for item in bot.edited_messages)
 
 
+async def test_verbose_completed_event_without_active_message_sends_and_clears():
+    bridge = make_verbose_bridge()
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+
+    await bridge.on_activity_event(
+        TEST_CHAT_ID,
+        AgentActivityBlock(kind="execute", title="Run", status="completed", text="output", activity_id="exec-1"),
+    )
+
+    assert len(bot.sent_messages) == 1
+
+
+async def test_verbose_internal_helpers_cover_remaining_branches(mocker):
+    bridge = make_verbose_bridge()
+    handler = cast(bot_module._VerboseActivityModeHandler, bridge._activity_handler(chat_id=TEST_CHAT_ID))
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+
+    assert await handler.finalize_reply(chat_id=TEST_CHAT_ID, update=cast(Update, make_update()), text="hello") is False
+
+    handler._clear_message(chat_id=TEST_CHAT_ID, slot_key="missing")
+
+    bridge._app = None
+    await handler._apply_block_locked(
+        chat_id=TEST_CHAT_ID,
+        slot_key="activity:reply",
+        block=AgentActivityBlock(kind="reply", title="", status="in_progress", text="preview", activity_id="reply"),
+    )
+
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+    handler._store_message(
+        chat_id=TEST_CHAT_ID,
+        slot_key="activity:reply",
+        message=bot_module._VerboseActivityMessage(
+            activity_id="reply",
+            kind="reply",
+            title="",
+            message_id=7,
+            source_text="preview",
+        ),
+    )
+    mocker.patch.object(TelegramBridge, "_edit_markdown_in_chat", return_value=True)
+    await handler._apply_block_locked(
+        chat_id=TEST_CHAT_ID,
+        slot_key="activity:reply",
+        block=AgentActivityBlock(kind="reply", title="", status="completed", text="done", activity_id="reply"),
+    )
+    assert "activity:reply" not in handler._messages_by_chat.get(TEST_CHAT_ID, {})
+
+    handler._store_message(
+        chat_id=TEST_CHAT_ID,
+        slot_key="activity:reply",
+        message=bot_module._VerboseActivityMessage(
+            activity_id="reply",
+            kind="reply",
+            title="",
+            message_id=8,
+            source_text="preview",
+        ),
+    )
+    mocker.patch.object(TelegramBridge, "_edit_markdown_in_chat", return_value=False)
+    mocked_send = mocker.patch.object(TelegramBridge, "_send_markdown_to_chat", return_value=None)
+    await handler._apply_block_locked(
+        chat_id=TEST_CHAT_ID,
+        slot_key="activity:reply",
+        block=AgentActivityBlock(kind="reply", title="", status="in_progress", text="retry", activity_id="reply"),
+    )
+    assert mocked_send.called
+    assert "activity:reply" not in handler._messages_by_chat.get(TEST_CHAT_ID, {})
+
+    mocked_message = SimpleNamespace(message_id=9)
+    mocker.patch.object(TelegramBridge, "_send_markdown_to_chat", return_value=mocked_message)
+    await handler._apply_block_locked(
+        chat_id=TEST_CHAT_ID,
+        slot_key="activity:exec-2",
+        block=AgentActivityBlock(kind="execute", title="Run", status="completed", text="done", activity_id="exec-2"),
+    )
+    assert "activity:exec-2" not in handler._messages_by_chat.get(TEST_CHAT_ID, {})
+
+
 async def test_compact_stale_status_cleared_when_reply_is_none():
     """Compact status message is deleted when the prompt cycle exits without a final reply."""
 
@@ -3679,6 +3954,11 @@ async def test_compact_stale_status_cleared_when_reply_is_none():
     assert len(bot.deleted_message_ids) == 1
     assert update.message is not None
     assert "Agent output exceeded ACP stdio limit." in update.message.replies[-1]
+
+
+async def test_animate_compact_status_returns_when_app_is_missing():
+    bridge = make_compact_bridge()
+    await bridge._animate_compact_status(chat_id=TEST_CHAT_ID, message_id=1)
 
 
 async def test_compact_rotating_dots_cycle(mocker):

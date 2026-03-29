@@ -357,6 +357,83 @@ async def test_acp_client_append_text_chunk_branch_coverage():
     assert _AcpClient._is_numeric_dot_continuation(previous="Version 1.", chunk="2.3") is True
 
 
+async def test_should_emit_incremental_text_returns_false_for_same_text():
+    assert _AcpClient._should_emit_incremental_text(previous_text="same", last_emit_monotonic=0.0, text="same") is False
+
+
+async def test_emit_incremental_text_block_skips_empty_or_unchanged_content():
+    events: list[AgentActivityBlock] = []
+
+    async def allow_first(_: str, options: list[PermissionOption], tool_call: ToolCall) -> RequestPermissionResponse:
+        del options, tool_call
+        return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
+
+    async def capture_event(_: str, block: AgentActivityBlock) -> None:
+        events.append(block)
+
+    client = _AcpClient(permission_decider=allow_first, activity_reporter=capture_event)
+    session_id = "s-incremental-branches"
+    client.start_capture(session_id)
+
+    await client._emit_incremental_text_block(session_id=session_id)
+    client._pending_non_tool_text[session_id] = []
+    await client._emit_incremental_text_block(session_id=session_id)
+    client._pending_non_tool_text[session_id] = ["   "]
+    await client._emit_incremental_text_block(session_id=session_id)
+    client._pending_non_tool_text[session_id] = ["same"]
+    client._pending_non_tool_state[session_id].last_emitted_text = "same"
+    client._pending_non_tool_state[session_id].last_emit_monotonic = asyncio.get_running_loop().time()
+    await client._emit_incremental_text_block(session_id=session_id)
+
+    assert events == []
+
+
+async def test_emit_incremental_text_block_skips_empty_and_unchanged_tool_output():
+    events: list[AgentActivityBlock] = []
+
+    async def allow_first(_: str, options: list[PermissionOption], tool_call: ToolCall) -> RequestPermissionResponse:
+        del options, tool_call
+        return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
+
+    async def capture_event(_: str, block: AgentActivityBlock) -> None:
+        events.append(block)
+
+    client = _AcpClient(permission_decider=allow_first, activity_reporter=capture_event)
+    session_id = "s-tool-incremental-branches"
+    client.start_capture(session_id)
+    await client._open_tool_block(session_id=session_id, tool_call_id="tool-1", kind="execute", title="Run")
+
+    await client._emit_incremental_text_block(session_id=session_id)
+    active = client._active_tool_blocks[session_id]
+    assert active is not None
+    active.chunks.append("same")
+    active.last_emitted_text = "same"
+    active.last_emit_monotonic = asyncio.get_running_loop().time()
+    await client._emit_incremental_text_block(session_id=session_id)
+
+    assert events == []
+
+
+async def test_flush_pending_non_tool_text_emits_completed_block_when_text_changed():
+    events: list[AgentActivityBlock] = []
+
+    async def allow_first(_: str, options: list[PermissionOption], tool_call: ToolCall) -> RequestPermissionResponse:
+        del options, tool_call
+        return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
+
+    async def capture_event(_: str, block: AgentActivityBlock) -> None:
+        events.append(block)
+
+    client = _AcpClient(permission_decider=allow_first, activity_reporter=capture_event)
+    session_id = "s-flush-pending"
+    client.start_capture(session_id)
+    client._pending_non_tool_text[session_id] = ["final thought"]
+
+    await client._flush_pending_non_tool_text(session_id=session_id)
+
+    assert events == [AgentActivityBlock(kind="think", title="", status="completed", text="final thought")]
+
+
 async def test_acp_client_non_text_chunk_in_active_tool_block_is_captured():
     client = make_client()
     session_id = "s-non-text-active"
