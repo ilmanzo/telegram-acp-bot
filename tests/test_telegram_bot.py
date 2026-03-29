@@ -2966,7 +2966,7 @@ async def test_on_message_queued_runs_automatically_and_button_is_removed():
     assert "done:second" in update_two.message.replies[-1]
 
 
-async def test_auto_drain_keeps_send_now_button_until_reply_dispatch_finishes():
+async def test_auto_drain_keeps_send_now_button_until_reply_dispatch_finishes(mocker):
     service = BlockingService()
     bridge = TelegramBridge(
         config=make_config(token="TOKEN", allowed_user_ids=[], workspace=".", activity_mode="verbose"),
@@ -2993,7 +2993,7 @@ async def test_auto_drain_keeps_send_now_button_until_reply_dispatch_finishes():
         await release_dispatch.wait()
         await original_dispatch_reply(chat_id=chat_id, update=update, reply=reply)
 
-    bridge._dispatch_reply = delayed_dispatch_reply  # type: ignore[method-assign]
+    mocker.patch.object(bridge, "_dispatch_reply", side_effect=delayed_dispatch_reply)
 
     task_one = asyncio.create_task(bridge.on_message(update_one, context))
     await service._prompt_started.wait()
@@ -3012,7 +3012,7 @@ async def test_auto_drain_keeps_send_now_button_until_reply_dispatch_finishes():
     assert any(edit.get("message_id") == 1 and edit.get("text") == BUSY_SENT_TEXT for edit in bot.edited_messages)
 
 
-async def test_on_busy_callback_updates_notification_while_prompt_is_already_dequeued():
+async def test_on_busy_callback_updates_notification_while_prompt_is_already_dequeued(mocker):
     service = BlockingService()
     bridge = TelegramBridge(
         config=make_config(token="TOKEN", allowed_user_ids=[], workspace=".", activity_mode="verbose"),
@@ -3034,7 +3034,7 @@ async def test_on_busy_callback_updates_notification_while_prompt_is_already_deq
         await release_dispatch.wait()
         await original_dispatch_reply(chat_id=chat_id, update=update, reply=reply)
 
-    bridge._dispatch_reply = delayed_dispatch_reply  # type: ignore[method-assign]
+    mocker.patch.object(bridge, "_dispatch_reply", side_effect=delayed_dispatch_reply)
 
     task_one = asyncio.create_task(bridge.on_message(update_one, context))
     await service._prompt_started.wait()
@@ -3471,11 +3471,16 @@ async def test_on_busy_callback_cancel_failure_answers_safely():
     """If cancel() raises, on_busy_callback answers 'Cancel failed.' and returns cleanly."""
     config = make_config(token="TOKEN", allowed_user_ids=[], workspace=".")
     bridge = TelegramBridge(config=config, agent_service=cast(AgentService, FailingCancelService()))
+    bridge._app = cast(Application, SimpleNamespace(bot=DummyBot()))
     token = "test-token"
+    notify_msg_id = 42
     dummy_update = make_update(chat_id=TEST_CHAT_ID, text="hi")
     prompt_input = _PromptInput(chat_id=TEST_CHAT_ID, text="hi", images=(), files=())
     bridge._pending_prompts_by_chat[TEST_CHAT_ID] = _PendingPrompt(
-        prompt_input=prompt_input, update=cast(Update, dummy_update), token=token
+        prompt_input=prompt_input,
+        update=cast(Update, dummy_update),
+        token=token,
+        notify_msg_id=notify_msg_id,
     )
 
     callback = DummyCallbackQuery(f"{BUSY_CALLBACK_PREFIX}|{token}")
@@ -3490,10 +3495,11 @@ async def test_on_busy_callback_cancel_failure_answers_safely():
     )
     await bridge.on_busy_callback(update_cb, make_context())
     assert callback.answers[-1] == "Cancel failed."
+    assert bridge._pending_prompts_by_chat[TEST_CHAT_ID].notify_msg_id == notify_msg_id
 
 
-@pytest.mark.parametrize(("mode", "expect_compact_reply"), [("normal", True), ("compact", False), ("verbose", True)])
-async def test_busy_queue_notification_is_visible_with_activity_in_all_modes(mode: str, expect_compact_reply: bool):
+@pytest.mark.parametrize(("mode", "expect_direct_replies"), [("normal", True), ("compact", False), ("verbose", True)])
+async def test_busy_queue_notification_is_visible_with_activity_in_all_modes(mode: str, expect_direct_replies: bool):
     service = BlockingActivityService()
     bridge = TelegramBridge(
         config=make_config(token="TOKEN", allowed_user_ids=[], workspace=".", activity_mode=cast(ActivityMode, mode)),
@@ -3523,13 +3529,33 @@ async def test_busy_queue_notification_is_visible_with_activity_in_all_modes(mod
 
     assert update_one.message is not None
     assert update_two.message is not None
-    if expect_compact_reply:
+    if expect_direct_replies:
         assert "done:first" in update_one.message.replies[-1]
         assert "done:second" in update_two.message.replies[-1]
     else:
         assert update_one.message.replies == []
         assert update_two.message.replies == []
         assert any("done:second" in cast(str, item["text"]) for item in bot.edited_messages)
+
+
+async def test_update_busy_notification_query_fallback_clears_reply_markup():
+    bridge = make_bridge()
+    pending = _PendingPrompt(
+        prompt_input=_PromptInput(chat_id=TEST_CHAT_ID, text="queued", images=(), files=()),
+        update=cast(Update, make_update(chat_id=TEST_CHAT_ID, text="queued")),
+        token="queued-token",
+    )
+    callback = DummyCallbackQuery(f"{BUSY_CALLBACK_PREFIX}|queued-token")
+
+    await bridge._update_busy_notification(
+        chat_id=TEST_CHAT_ID,
+        pending=pending,
+        query=callback,
+        text=BUSY_SENT_TEXT,
+    )
+
+    assert callback.edited_text == BUSY_SENT_TEXT
+    assert callback.edited_kwargs["reply_markup"] is None
 
 
 @pytest.mark.parametrize("mode", ["normal", "compact", "verbose"])

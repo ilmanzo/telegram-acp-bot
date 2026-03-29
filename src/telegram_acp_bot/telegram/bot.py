@@ -1040,7 +1040,6 @@ class TelegramBridge:
                 except Exception:
                     logger.exception("Unhandled error while cancelling prompt in busy callback")
                     await self._dismiss_busy_notification(chat_id=chat_id, pending=pending, query=query)
-                    pending.notify_msg_id = None
                     await query.answer("Cancel failed.")
                     return
                 await query.answer(BUSY_SENT_TEXT)
@@ -1420,7 +1419,11 @@ class TelegramBridge:
                     logger.exception("Failed to send busy notification for chat_id=%s", chat_id)
 
     async def _clear_busy_button(self, pending: _PendingPrompt | None) -> None:
-        """Update the busy notification to `BUSY_SENT_TEXT` and remove the *Send now* button when the queued prompt is about to be processed."""
+        """Update the busy notification to `BUSY_SENT_TEXT`.
+
+        Also remove the *Send now* button when the queued prompt is about to
+        be processed.
+        """
         if pending is None or pending.notify_msg_id is None or self._app is None:
             return
         with suppress(TelegramError):
@@ -1456,7 +1459,7 @@ class TelegramBridge:
                 )
                 return
         with suppress(TelegramError):
-            await query.edit_message_text(text)
+            await query.edit_message_text(text, reply_markup=None)
             return
         await self._dismiss_busy_notification(chat_id=chat_id, pending=pending, query=query)
 
