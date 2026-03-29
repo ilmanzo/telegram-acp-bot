@@ -28,7 +28,7 @@ from telegram_acp_bot.logging_context import LOG_TEXT_PREVIEW_MAX_CHARS, log_tex
 from telegram_acp_bot.telegram import bot as bot_module
 from telegram_acp_bot.telegram.bot import (
     BUSY_CALLBACK_PREFIX,
-    BUSY_DEQUEUED_TEXT,
+    BUSY_SENT_TEXT,
     RESTART_EXIT_CODE,
     RESUME_KEYBOARD_MAX_ROWS,
     AgentService,
@@ -2958,7 +2958,7 @@ async def test_on_message_queued_runs_automatically_and_button_is_removed():
     service.release()
     await task_one
 
-    assert any(edit.get("message_id") == 1 and edit.get("text") == BUSY_DEQUEUED_TEXT for edit in bot.edited_messages)
+    assert any(edit.get("message_id") == 1 and edit.get("text") == BUSY_SENT_TEXT for edit in bot.edited_messages)
     # Both updates should have received replies
     assert update_one.message is not None
     assert update_two.message is not None
@@ -3009,7 +3009,7 @@ async def test_auto_drain_keeps_send_now_button_until_reply_dispatch_finishes():
     release_dispatch.set()
     await task_one
 
-    assert any(edit.get("message_id") == 1 and edit.get("text") == BUSY_DEQUEUED_TEXT for edit in bot.edited_messages)
+    assert any(edit.get("message_id") == 1 and edit.get("text") == BUSY_SENT_TEXT for edit in bot.edited_messages)
 
 
 async def test_on_busy_callback_updates_notification_while_prompt_is_already_dequeued():

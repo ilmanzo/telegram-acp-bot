@@ -60,9 +60,8 @@ BUSY_CALLBACK_PREFIX = "busy"
 PERMISSION_CALLBACK_PARTS = 3
 RESUME_CALLBACK_PARTS = 2
 BUSY_CALLBACK_PARTS = 2
-BUSY_SEND_NOW_TEXT = "✅ Sent."
+BUSY_SENT_TEXT = "✅ Sent."
 BUSY_QUEUED_TEXT = "⏳ Agent is busy. Your message is queued."
-BUSY_DEQUEUED_TEXT = "▶️ Sending your queued message..."
 MAX_RESUME_ARGS = 1
 MAX_RESTART_ARGS = 2
 RESUME_KEYBOARD_MAX_ROWS = 10
@@ -1044,22 +1043,22 @@ class TelegramBridge:
                     pending.notify_msg_id = None
                     await query.answer("Cancel failed.")
                     return
-                await query.answer(BUSY_SEND_NOW_TEXT)
+                await query.answer(BUSY_SENT_TEXT)
                 await self._update_busy_notification(
                     chat_id=chat_id,
                     pending=pending,
                     query=query,
-                    text=BUSY_SEND_NOW_TEXT,
+                    text=BUSY_SENT_TEXT,
                 )
                 pending.notify_msg_id = None
             return
 
-        await query.answer(BUSY_SEND_NOW_TEXT)
+        await query.answer(BUSY_SENT_TEXT)
         await self._update_busy_notification(
             chat_id=chat_id,
             pending=pending,
             query=query,
-            text=BUSY_SEND_NOW_TEXT,
+            text=BUSY_SENT_TEXT,
         )
         pending.notify_msg_id = None
 
@@ -1428,7 +1427,7 @@ class TelegramBridge:
             await self._app.bot.edit_message_text(
                 chat_id=pending.prompt_input.chat_id,
                 message_id=pending.notify_msg_id,
-                text=BUSY_DEQUEUED_TEXT,
+                text=BUSY_SENT_TEXT,
                 reply_markup=None,
             )
             return
