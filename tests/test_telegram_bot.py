@@ -10,7 +10,7 @@ from typing import cast
 import pytest
 from telegram import Bot, InlineKeyboardMarkup, MessageEntity, Update
 from telegram.error import TelegramError
-from telegram.ext import Application
+from telegram.ext import AIORateLimiter, Application
 
 from telegram_acp_bot.acp_app.echo_service import EchoAgentService
 from telegram_acp_bot.acp_app.models import (
@@ -481,6 +481,18 @@ async def test_start_and_help():
     assert "Send a message to start in the default workspace" in update.message.replies[0]
     assert "Commands:" in update.message.replies[1]
     assert "/cancel" in update.message.replies[1]
+    assert "/mode" in update.message.replies[1]
+
+
+async def test_mode_command_sets_verbose_activity_mode():
+    bridge = make_bridge()
+    update = make_update(with_message=True)
+
+    await bridge.mode(update, make_context(args=["verbose"]))
+
+    assert update.message is not None
+    assert update.message.replies == ["Activity mode set to verbose."]
+    assert bridge._activity_mode(chat_id=TEST_CHAT_ID) == "verbose"
 
 
 async def test_start_allows_user_by_username_allowlist():
@@ -2528,6 +2540,7 @@ async def test_build_application_installs_handlers():
     app = build_application(config, bridge)
     assert app.handlers
     assert app.update_processor.max_concurrent_updates > 1
+    assert isinstance(app.bot.rate_limiter, AIORateLimiter)
 
 
 async def test_run_polling(monkeypatch):
@@ -3473,6 +3486,31 @@ async def test_verbose_final_reply_replaces_streamed_reply_preview_when_markdown
     assert bot.edited_messages[0]["entities"]
     assert update.message is not None
     assert update.message.replies == []
+
+
+async def test_verbose_in_progress_updates_are_coalesced_before_editing(mocker):
+    mocker.patch.object(bot_module, "VERBOSE_STREAM_TICK_SECONDS", 0.01)
+    bridge = make_verbose_bridge()
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+
+    await bridge.on_activity_event(
+        TEST_CHAT_ID,
+        AgentActivityBlock(kind="reply", title="", status="in_progress", text="one", activity_id="reply"),
+    )
+    await bridge.on_activity_event(
+        TEST_CHAT_ID,
+        AgentActivityBlock(kind="reply", title="", status="in_progress", text="one two", activity_id="reply"),
+    )
+    await bridge.on_activity_event(
+        TEST_CHAT_ID,
+        AgentActivityBlock(kind="reply", title="", status="in_progress", text="one two three", activity_id="reply"),
+    )
+    await asyncio.sleep(0.03)
+
+    assert len(bot.sent_messages) == 1
+    assert len(bot.edited_messages) == 1
+    assert cast(str, bot.edited_messages[-1]["text"]) == "one two three"
 
 
 async def test_compact_stale_status_cleared_when_reply_is_none():

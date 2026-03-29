@@ -331,3 +331,12 @@ def test_main_verbose_activity_mode_sets_flag(mocker):
     assert mock_run_polling.call_args is not None
     config = mock_run_polling.call_args.args[0]
     assert config.activity_mode == "verbose"
+
+
+def test_main_activity_mode_short_alias_sets_flag(mocker):
+    """-m verbose is accepted as shorthand for --activity-mode verbose."""
+    mock_run_polling = mocker.patch("telegram_acp_bot.run_polling", return_value=0)
+    assert main(["--telegram-token", "TOKEN", "--agent-command", "agent", "-m", "verbose"]) == 0
+    assert mock_run_polling.call_args is not None
+    config = mock_run_polling.call_args.args[0]
+    assert config.activity_mode == "verbose"

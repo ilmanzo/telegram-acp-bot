@@ -575,6 +575,13 @@ async def test_acp_client_emits_incremental_updates_for_active_tool_text():
             text="first line",
             activity_id="tool-exec",
         ),
+        AgentActivityBlock(
+            kind="execute",
+            title="Run command",
+            status="in_progress",
+            text="first line second line",
+            activity_id="tool-exec",
+        ),
     ]
 
 

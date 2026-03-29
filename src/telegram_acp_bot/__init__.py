@@ -105,6 +105,7 @@ def get_parser() -> argparse.ArgumentParser:
         help="Application log format.",
     )
     parser.add_argument(
+        "-m",
         "--activity-mode",
         default=os.getenv("ACP_ACTIVITY_MODE", "normal"),
         choices=["compact", "normal", "verbose"],

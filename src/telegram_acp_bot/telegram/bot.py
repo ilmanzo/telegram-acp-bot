@@ -25,7 +25,15 @@ from telegram import (
 )
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import TelegramError
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    AIORateLimiter,
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 from telegramify_markdown import MessageEntity as MarkdownMessageEntity
 from telegramify_markdown import convert, split_entities
 
@@ -84,6 +92,7 @@ SEARCH_LABEL_NEUTRAL = "🔎 Querying"
 REPLY_LABEL = "✍️ Replying"
 ACTIVITY_MODE_CHOICES: tuple[ActivityMode, ...] = ("normal", "compact", "verbose")
 ACTIVITY_MODE_HELP = "normal, compact, or verbose"
+VERBOSE_STREAM_TICK_SECONDS = 0.15
 
 
 @dataclass(slots=True, frozen=True)
@@ -141,6 +150,15 @@ class _VerboseActivityMessage:
     title: str
     message_id: int
     source_text: str
+
+
+@dataclass(slots=True, frozen=True)
+class _QueuedVerboseBlock:
+    """Latest queued in-progress block waiting for the next coalesced flush."""
+
+    chat_id: int
+    slot_key: str
+    block: AgentActivityBlock
 
 
 class ChatRequiredError(ValueError):
@@ -349,68 +367,33 @@ class _VerboseActivityModeHandler(_ActivityModeHandler):
         super().__init__(bridge)
         self._locks: dict[int, asyncio.Lock] = {}
         self._messages_by_chat: dict[int, dict[str, _VerboseActivityMessage]] = {}
+        self._pending_by_chat: dict[int, dict[str, _QueuedVerboseBlock]] = {}
+        self._flush_tasks_by_chat: dict[int, asyncio.Task[None]] = {}
 
     async def on_activity_event(self, *, chat_id: int, block: AgentActivityBlock) -> None:
         app = self._bridge._app
         if app is None:
             return
         slot_key = self._slot_key(block)
-        text = (
-            block.text
-            if block.kind == "reply"
-            else self._bridge._format_activity_block(
-                block,
-                workspace=self._bridge._activity_workspace(chat_id=chat_id),
-            )
-        )
         lock = self._locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
             active = self._messages_by_chat.get(chat_id, {}).get(slot_key)
             if active is not None and block.text and not block.text.startswith(active.source_text):
                 self._clear_message(chat_id=chat_id, slot_key=slot_key)
                 active = None
-            if active is not None:
-                edited = await TelegramBridge._edit_markdown_in_chat(
-                    bot=app.bot,
-                    chat_id=chat_id,
-                    message_id=active.message_id,
-                    text=text,
-                )
-                if edited:
-                    if block.status == "in_progress":
-                        self._store_message(
-                            chat_id=chat_id,
-                            slot_key=slot_key,
-                            message=_VerboseActivityMessage(
-                                activity_id=active.activity_id,
-                                kind=block.kind,
-                                title=block.title,
-                                message_id=active.message_id,
-                                source_text=block.text,
-                            ),
-                        )
-                    else:
-                        self._clear_message(chat_id=chat_id, slot_key=slot_key)
-                    return
-                self._clear_message(chat_id=chat_id, slot_key=slot_key)
-
-            sent = await TelegramBridge._send_markdown_to_chat(bot=app.bot, chat_id=chat_id, text=text)
-            if sent is None:
-                return
             if block.status == "in_progress":
-                self._store_message(
+                if active is None:
+                    await self._apply_block_locked(chat_id=chat_id, slot_key=slot_key, block=block)
+                    return
+                self._pending_by_chat.setdefault(chat_id, {})[slot_key] = _QueuedVerboseBlock(
                     chat_id=chat_id,
                     slot_key=slot_key,
-                    message=_VerboseActivityMessage(
-                        activity_id=self._bridge._activity_id(block),
-                        kind=block.kind,
-                        title=block.title,
-                        message_id=sent.message_id,
-                        source_text=block.text,
-                    ),
+                    block=block,
                 )
-            else:
-                self._clear_message(chat_id=chat_id, slot_key=slot_key)
+                self._ensure_flush_task(chat_id=chat_id)
+                return
+            self._clear_pending(chat_id=chat_id, slot_key=slot_key)
+            await self._apply_block_locked(chat_id=chat_id, slot_key=slot_key, block=block)
 
     async def finalize_reply(self, *, chat_id: int, update: Update, text: str) -> bool:
         del update
@@ -419,6 +402,7 @@ class _VerboseActivityModeHandler(_ActivityModeHandler):
             return False
         lock = self._locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
+            self._clear_pending(chat_id=chat_id, slot_key="activity:reply")
             active = self._messages_by_chat.get(chat_id, {}).get("activity:reply")
             if active is None:
                 return False
@@ -441,6 +425,8 @@ class _VerboseActivityModeHandler(_ActivityModeHandler):
             return edited
 
     async def clear_chat_state(self, *, chat_id: int) -> None:
+        self._cancel_flush_task(chat_id)
+        self._pending_by_chat.pop(chat_id, None)
         self._messages_by_chat.pop(chat_id, None)
 
     def _slot_key(self, block: AgentActivityBlock) -> str:
@@ -456,6 +442,106 @@ class _VerboseActivityModeHandler(_ActivityModeHandler):
         messages.pop(slot_key, None)
         if not messages:
             self._messages_by_chat.pop(chat_id, None)
+
+    def _clear_pending(self, *, chat_id: int, slot_key: str) -> None:
+        pending = self._pending_by_chat.get(chat_id)
+        if pending is None:
+            return
+        pending.pop(slot_key, None)
+        if not pending:
+            self._pending_by_chat.pop(chat_id, None)
+            self._cancel_flush_task(chat_id)
+
+    def _cancel_flush_task(self, chat_id: int) -> None:
+        task = self._flush_tasks_by_chat.pop(chat_id, None)
+        if task is not None:
+            task.cancel()
+
+    def _ensure_flush_task(self, *, chat_id: int) -> None:
+        task = self._flush_tasks_by_chat.get(chat_id)
+        if task is not None and not task.done():
+            return
+        self._flush_tasks_by_chat[chat_id] = asyncio.create_task(self._run_flush_loop(chat_id=chat_id))
+
+    async def _run_flush_loop(self, *, chat_id: int) -> None:
+        try:
+            while True:
+                await asyncio.sleep(VERBOSE_STREAM_TICK_SECONDS)
+                lock = self._locks.setdefault(chat_id, asyncio.Lock())
+                async with lock:
+                    pending = self._pending_by_chat.get(chat_id)
+                    if not pending:
+                        self._pending_by_chat.pop(chat_id, None)
+                        return
+                    queued_blocks = list(pending.values())
+                    self._pending_by_chat.pop(chat_id, None)
+                    for queued in queued_blocks:
+                        await self._apply_block_locked(
+                            chat_id=queued.chat_id,
+                            slot_key=queued.slot_key,
+                            block=queued.block,
+                        )
+        finally:
+            current = asyncio.current_task()
+            task = self._flush_tasks_by_chat.get(chat_id)
+            if task is current:
+                self._flush_tasks_by_chat.pop(chat_id, None)
+
+    async def _apply_block_locked(self, *, chat_id: int, slot_key: str, block: AgentActivityBlock) -> None:
+        app = self._bridge._app
+        if app is None:
+            return
+        text = (
+            block.text
+            if block.kind == "reply"
+            else self._bridge._format_activity_block(
+                block,
+                workspace=self._bridge._activity_workspace(chat_id=chat_id),
+            )
+        )
+        active = self._messages_by_chat.get(chat_id, {}).get(slot_key)
+        if active is not None:
+            edited = await TelegramBridge._edit_markdown_in_chat(
+                bot=app.bot,
+                chat_id=chat_id,
+                message_id=active.message_id,
+                text=text,
+            )
+            if edited:
+                if block.status == "in_progress":
+                    self._store_message(
+                        chat_id=chat_id,
+                        slot_key=slot_key,
+                        message=_VerboseActivityMessage(
+                            activity_id=active.activity_id,
+                            kind=block.kind,
+                            title=block.title,
+                            message_id=active.message_id,
+                            source_text=block.text,
+                        ),
+                    )
+                else:
+                    self._clear_message(chat_id=chat_id, slot_key=slot_key)
+                return
+            self._clear_message(chat_id=chat_id, slot_key=slot_key)
+
+        sent = await TelegramBridge._send_markdown_to_chat(bot=app.bot, chat_id=chat_id, text=text)
+        if sent is None:
+            return
+        if block.status == "in_progress":
+            self._store_message(
+                chat_id=chat_id,
+                slot_key=slot_key,
+                message=_VerboseActivityMessage(
+                    activity_id=self._bridge._activity_id(block),
+                    kind=block.kind,
+                    title=block.title,
+                    message_id=sent.message_id,
+                    source_text=block.text,
+                ),
+            )
+            return
+        self._clear_message(chat_id=chat_id, slot_key=slot_key)
 
 
 class TelegramBridge:
@@ -1879,7 +1965,7 @@ class TelegramBridge:
 def build_application(config: BotConfig, bridge: TelegramBridge) -> Application:
     # Permission prompts are awaited inside message handlers, so callback queries
     # must be processed concurrently to avoid deadlocking the update loop.
-    app = Application.builder().token(config.token).concurrent_updates(True).build()
+    app = Application.builder().token(config.token).rate_limiter(AIORateLimiter()).concurrent_updates(True).build()
     bridge.install(app)
     return app
 

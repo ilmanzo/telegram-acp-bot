@@ -74,8 +74,8 @@ logger = logging.getLogger(__name__)
 TERMINAL_TOOL_STATUSES = {"completed", "failed"}
 MIN_NUMERIC_DOT_PREFIX_LENGTH = 2
 MIN_NUMERIC_DOT_CHUNK_MIN_LENGTH = 2
-INCREMENTAL_TEXT_MIN_INTERVAL_SECONDS = 0.35
-INCREMENTAL_TEXT_MIN_DELTA_CHARS = 24
+INCREMENTAL_TEXT_MIN_INTERVAL_SECONDS = 0.15
+INCREMENTAL_TEXT_MIN_DELTA_CHARS = 12
 INCREMENTAL_TEXT_BOUNDARY_CHARS = ("\n", ".", "!", "?", ":", ";")
 PromptContentBlock = (
     TextContentBlock | ImageContentBlock | AudioContentBlock | ResourceContentBlock | EmbeddedResourceContentBlock
