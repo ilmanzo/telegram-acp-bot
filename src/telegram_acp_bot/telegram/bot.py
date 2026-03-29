@@ -62,6 +62,7 @@ RESUME_CALLBACK_PARTS = 2
 BUSY_CALLBACK_PARTS = 2
 BUSY_SEND_NOW_TEXT = "✅ Sent."
 BUSY_QUEUED_TEXT = "⏳ Agent is busy. Your message is queued."
+BUSY_DEQUEUED_TEXT = "▶️ Sending your queued message..."
 MAX_RESUME_ARGS = 1
 MAX_RESTART_ARGS = 2
 RESUME_KEYBOARD_MAX_ROWS = 10
@@ -1422,6 +1423,14 @@ class TelegramBridge:
     async def _clear_busy_button(self, pending: _PendingPrompt | None) -> None:
         """Remove the *Send now* button when the queued prompt is about to be processed."""
         if pending is None or pending.notify_msg_id is None or self._app is None:
+            return
+        with suppress(TelegramError):
+            await self._app.bot.edit_message_text(
+                chat_id=pending.prompt_input.chat_id,
+                message_id=pending.notify_msg_id,
+                text=BUSY_DEQUEUED_TEXT,
+                reply_markup=None,
+            )
             return
         with suppress(TelegramError):
             await self._app.bot.edit_message_reply_markup(

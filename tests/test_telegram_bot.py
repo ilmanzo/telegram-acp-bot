@@ -28,6 +28,7 @@ from telegram_acp_bot.logging_context import LOG_TEXT_PREVIEW_MAX_CHARS, log_tex
 from telegram_acp_bot.telegram import bot as bot_module
 from telegram_acp_bot.telegram.bot import (
     BUSY_CALLBACK_PREFIX,
+    BUSY_DEQUEUED_TEXT,
     RESTART_EXIT_CODE,
     RESUME_KEYBOARD_MAX_ROWS,
     AgentService,
@@ -2957,8 +2958,7 @@ async def test_on_message_queued_runs_automatically_and_button_is_removed():
     service.release()
     await task_one
 
-    # Button should have been removed via edit_message_reply_markup
-    assert any(e.get("message_id") == 1 for e in bot.edited_reply_markups)
+    assert any(edit.get("message_id") == 1 and edit.get("text") == BUSY_DEQUEUED_TEXT for edit in bot.edited_messages)
     # Both updates should have received replies
     assert update_one.message is not None
     assert update_two.message is not None
@@ -3009,7 +3009,7 @@ async def test_auto_drain_keeps_send_now_button_until_reply_dispatch_finishes():
     release_dispatch.set()
     await task_one
 
-    assert any(e.get("message_id") == 1 for e in bot.edited_reply_markups)
+    assert any(edit.get("message_id") == 1 and edit.get("text") == BUSY_DEQUEUED_TEXT for edit in bot.edited_messages)
 
 
 async def test_on_busy_callback_updates_notification_while_prompt_is_already_dequeued():
@@ -3440,6 +3440,31 @@ async def test_clear_busy_button_telegram_error_is_swallowed():
     # Release - _clear_busy_button will try to edit and fail
     service.release()
     await task_one  # must complete without exception
+
+
+async def test_clear_busy_button_falls_back_to_markup_when_text_edit_fails():
+    service = BlockingService()
+    config = make_config(token="TOKEN", allowed_user_ids=[], workspace=".")
+    bridge = TelegramBridge(config=config, agent_service=cast(AgentService, service))
+
+    class TextFailingBot(DummyBot):
+        async def edit_message_text(self, **kwargs: object) -> None:
+            raise MarkdownFailureError
+
+    bot = TextFailingBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+    notify_msg_id = 42
+
+    pending = _PendingPrompt(
+        prompt_input=_PromptInput(chat_id=TEST_CHAT_ID, text="queued", images=(), files=()),
+        update=cast(Update, make_update(chat_id=TEST_CHAT_ID, text="queued")),
+        token="queued-token",
+        notify_msg_id=notify_msg_id,
+    )
+
+    await bridge._clear_busy_button(pending)
+
+    assert any(edit.get("message_id") == notify_msg_id for edit in bot.edited_reply_markups)
 
 
 async def test_on_busy_callback_cancel_failure_answers_safely():
