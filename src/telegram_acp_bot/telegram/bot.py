@@ -62,6 +62,7 @@ RESUME_CALLBACK_PARTS = 2
 BUSY_CALLBACK_PARTS = 2
 BUSY_SENT_TEXT = "✅ Sent."
 BUSY_QUEUED_TEXT = "⏳ Agent is busy. Your message is queued."
+BUSY_STILL_QUEUED_TEXT = "Still queued."
 MAX_RESUME_ARGS = 1
 MAX_RESTART_ARGS = 2
 RESUME_KEYBOARD_MAX_ROWS = 10
@@ -1036,11 +1037,14 @@ class TelegramBridge:
         if not already_dequeued:
             with bind_log_context(chat_id=chat_id, prompt_cycle_id=pending.prompt_input.cycle_id):
                 try:
-                    await self._agent_service.cancel(chat_id=chat_id)
+                    cancelled = await self._agent_service.cancel(chat_id=chat_id)
                 except Exception:
                     logger.exception("Unhandled error while cancelling prompt in busy callback")
                     await self._dismiss_busy_notification(chat_id=chat_id, pending=pending, query=query)
                     await query.answer("Cancel failed.")
+                    return
+                if not cancelled:
+                    await query.answer(BUSY_STILL_QUEUED_TEXT)
                     return
                 await query.answer(BUSY_SENT_TEXT)
                 await self._update_busy_notification(
@@ -1169,17 +1173,23 @@ class TelegramBridge:
             else:
                 self._dequeued_prompts_by_chat.pop(chat_id, None)
 
-            if reply is not None:
-                await self._dispatch_reply(chat_id=chat_id, update=current_update, reply=reply)
-                with bind_log_context(chat_id=chat_id, prompt_cycle_id=current_input.cycle_id):
-                    logger.info("Prompt cycle completed")
-            await self._activity_handler(chat_id=chat_id).clear_chat_state(chat_id=chat_id)
+            try:
+                if reply is not None:
+                    await self._dispatch_reply(chat_id=chat_id, update=current_update, reply=reply)
+                    with bind_log_context(chat_id=chat_id, prompt_cycle_id=current_input.cycle_id):
+                        logger.info("Prompt cycle completed")
+                await self._activity_handler(chat_id=chat_id).clear_chat_state(chat_id=chat_id)
+
+                if pending is None:
+                    return
+
+                await self._clear_busy_button(pending)
+            finally:
+                self._dequeued_prompts_by_chat.pop(chat_id, None)
 
             if pending is None:
                 return
 
-            await self._clear_busy_button(pending)
-            self._dequeued_prompts_by_chat.pop(chat_id, None)
             with bind_log_context(chat_id=chat_id, prompt_cycle_id=pending.prompt_input.cycle_id):
                 logger.info("Dequeued pending prompt cycle")
             current_input = pending.prompt_input

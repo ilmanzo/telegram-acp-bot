@@ -29,6 +29,7 @@ from telegram_acp_bot.telegram import bot as bot_module
 from telegram_acp_bot.telegram.bot import (
     BUSY_CALLBACK_PREFIX,
     BUSY_SENT_TEXT,
+    BUSY_STILL_QUEUED_TEXT,
     RESTART_EXIT_CODE,
     RESUME_KEYBOARD_MAX_ROWS,
     AgentService,
@@ -2856,6 +2857,84 @@ class BlockingActivityService(BlockingService):
         self._activity_handler = handler
 
 
+class WindowAwareBlockingService:
+    """Blocking service that reports whether a prompt is currently active."""
+
+    def __init__(self) -> None:
+        self._workspace: Path | None = None
+        self._prompt_started = asyncio.Event()
+        self._prompt_gate = asyncio.Event()
+        self._prompt_progress = asyncio.Condition()
+        self.active_prompt = False
+        self.prompts: list[str] = []
+
+    async def new_session(self, *, chat_id: int, workspace: Path) -> str:
+        del chat_id
+        self._workspace = workspace
+        return "s-window-aware"
+
+    async def prompt(self, *, chat_id: int, text: str, images=(), files=()) -> AgentReply:
+        del chat_id, images, files
+        async with self._prompt_progress:
+            self.prompts.append(text)
+            self._prompt_progress.notify_all()
+        self.active_prompt = True
+        self._prompt_started.set()
+        await self._prompt_gate.wait()
+        self.active_prompt = False
+        self._prompt_started = asyncio.Event()
+        self._prompt_gate = asyncio.Event()
+        return AgentReply(text=f"done:{text}")
+
+    def get_workspace(self, *, chat_id: int) -> Path | None:
+        del chat_id
+        return self._workspace
+
+    def supports_session_loading(self, *, chat_id: int) -> bool | None:
+        del chat_id
+        return None
+
+    async def wait_for_prompt_count(self, count: int) -> None:
+        async with self._prompt_progress:
+            await self._prompt_progress.wait_for(lambda: len(self.prompts) >= count)
+
+    async def cancel(self, *, chat_id: int) -> bool:
+        del chat_id
+        if not self.active_prompt:
+            return False
+        self._prompt_gate.set()
+        return True
+
+    async def stop(self, *, chat_id: int) -> bool:
+        del chat_id
+        return False
+
+    async def clear(self, *, chat_id: int) -> bool:
+        del chat_id
+        return False
+
+    def get_permission_policy(self, *, chat_id: int):
+        del chat_id
+
+    async def set_session_permission_mode(self, *, chat_id: int, mode):
+        del chat_id, mode
+        return False
+
+    async def set_next_prompt_auto_approve(self, *, chat_id: int, enabled: bool):
+        del chat_id, enabled
+        return False
+
+    def set_permission_request_handler(self, handler):
+        del handler
+
+    def set_activity_event_handler(self, handler):
+        del handler
+
+    async def respond_permission_request(self, *, chat_id: int, request_id: str, action):
+        del chat_id, request_id, action
+        return False
+
+
 class FailingCancelService:
     def __init__(self) -> None:
         self._workspace: Path | None = Path(".")
@@ -3073,6 +3152,67 @@ async def test_on_busy_callback_updates_notification_while_prompt_is_already_deq
     await task_one
 
 
+async def test_on_busy_callback_keeps_prompt_queued_when_cancel_returns_false_during_dispatch(mocker):
+    service = WindowAwareBlockingService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace=".", activity_mode="verbose"),
+        agent_service=cast(AgentService, service),
+    )
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+
+    update_one = make_update(chat_id=TEST_CHAT_ID, text="first")
+    update_two = make_update(chat_id=TEST_CHAT_ID, text="second")
+    update_three = make_update(chat_id=TEST_CHAT_ID, text="third")
+    context = make_context(application=SimpleNamespace(bot=bot))
+
+    dispatch_entered = asyncio.Event()
+    release_dispatch = asyncio.Event()
+    original_dispatch_reply = bridge._dispatch_reply
+
+    async def delayed_dispatch_reply(*, chat_id: int, update: Update, reply: AgentReply) -> None:
+        dispatch_entered.set()
+        await release_dispatch.wait()
+        await original_dispatch_reply(chat_id=chat_id, update=update, reply=reply)
+
+    mocker.patch.object(bridge, "_dispatch_reply", side_effect=delayed_dispatch_reply)
+
+    task_one = asyncio.create_task(bridge.on_message(update_one, context))
+    await asyncio.wait_for(service.wait_for_prompt_count(1), timeout=1)
+    await bridge.on_message(update_two, context)
+
+    service._prompt_gate.set()
+    await asyncio.wait_for(dispatch_entered.wait(), timeout=1)
+    await bridge.on_message(update_three, context)
+
+    markup = cast(InlineKeyboardMarkup, bot.sent_messages[-1]["reply_markup"])
+    token = cast(str, markup.inline_keyboard[0][0].callback_data).split("|", 1)[1]
+    callback = DummyCallbackQuery(f"{BUSY_CALLBACK_PREFIX}|{token}")
+    update_cb = cast(
+        Update,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=TEST_CHAT_ID),
+            callback_query=callback,
+            message=None,
+        ),
+    )
+
+    await bridge.on_busy_callback(update_cb, make_context())
+
+    assert callback.answers[-1] == BUSY_STILL_QUEUED_TEXT
+    assert bridge._pending_prompts_by_chat[TEST_CHAT_ID].token == token
+    queued_notification_id = 2
+    assert all(edit.get("message_id") != queued_notification_id for edit in bot.edited_messages)
+
+    release_dispatch.set()
+    await asyncio.wait_for(service.wait_for_prompt_count(2), timeout=1)
+    service._prompt_gate.set()
+    await asyncio.wait_for(service.wait_for_prompt_count(3), timeout=1)
+    service._prompt_gate.set()
+    await asyncio.wait_for(task_one, timeout=1)
+
+
 async def test_on_busy_callback_send_now_cancels_and_queued_runs():
     service = BlockingService()
     config = make_config(token="TOKEN", allowed_user_ids=[], workspace=".")
@@ -3184,6 +3324,54 @@ async def test_on_busy_callback_stale_after_auto_drain():
             message=None,
         ),
     )
+    await bridge.on_busy_callback(update_cb, make_context())
+
+    assert callback.answers[-1] == "Already sent."
+
+
+async def test_dispatch_reply_failure_clears_dequeued_prompt_state():
+    service = BlockingService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace=".", activity_mode="verbose"),
+        agent_service=cast(AgentService, service),
+    )
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+
+    update_one = make_update(chat_id=TEST_CHAT_ID, text="first")
+    update_two = make_update(chat_id=TEST_CHAT_ID, text="second")
+    context = make_context(application=SimpleNamespace(bot=bot))
+
+    task_one = asyncio.create_task(bridge.on_message(update_one, context))
+    await service._prompt_started.wait()
+    await bridge.on_message(update_two, context)
+
+    markup = cast(InlineKeyboardMarkup, bot.sent_messages[0]["reply_markup"])
+    token = cast(str, markup.inline_keyboard[0][0].callback_data).split("|", 1)[1]
+
+    async def failing_dispatch_reply(*, chat_id: int, update: Update, reply: AgentReply) -> None:
+        del chat_id, update, reply
+        raise MarkdownFailureError
+
+    bridge._dispatch_reply = failing_dispatch_reply  # type: ignore[method-assign]
+
+    service.release()
+    with pytest.raises(MarkdownFailureError):
+        await task_one
+
+    assert TEST_CHAT_ID not in bridge._dequeued_prompts_by_chat
+
+    callback = DummyCallbackQuery(f"{BUSY_CALLBACK_PREFIX}|{token}")
+    update_cb = cast(
+        Update,
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=1),
+            effective_chat=SimpleNamespace(id=TEST_CHAT_ID),
+            callback_query=callback,
+            message=None,
+        ),
+    )
+
     await bridge.on_busy_callback(update_cb, make_context())
 
     assert callback.answers[-1] == "Already sent."
