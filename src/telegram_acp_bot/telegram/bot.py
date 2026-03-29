@@ -380,6 +380,7 @@ class _VerboseActivityModeHandler(_ActivityModeHandler):
             active = self._messages_by_chat.get(chat_id, {}).get(slot_key)
             if active is not None and block.text and not block.text.startswith(active.source_text):
                 self._clear_message(chat_id=chat_id, slot_key=slot_key)
+                self._clear_pending(chat_id=chat_id, slot_key=slot_key)
                 active = None
             if block.status == "in_progress":
                 if active is None:
@@ -422,7 +423,10 @@ class _VerboseActivityModeHandler(_ActivityModeHandler):
             )
             if edited:
                 await TelegramBridge._send_rendered_chunks_to_chat(bot=app.bot, chat_id=chat_id, chunks=chunks[1:])
-            return edited
+                return True
+            with suppress(TelegramError):
+                await app.bot.delete_message(chat_id=chat_id, message_id=active.message_id)
+            return False
 
     async def clear_chat_state(self, *, chat_id: int) -> None:
         self._cancel_flush_task(chat_id)
@@ -1097,8 +1101,7 @@ class TelegramBridge:
                 await self._dispatch_reply(chat_id=chat_id, update=current_update, reply=reply)
                 with bind_log_context(chat_id=chat_id, prompt_cycle_id=current_input.cycle_id):
                     logger.info("Prompt cycle completed")
-            else:
-                await self._activity_handler(chat_id=chat_id).clear_chat_state(chat_id=chat_id)
+            await self._activity_handler(chat_id=chat_id).clear_chat_state(chat_id=chat_id)
 
             if pending is None:
                 return

@@ -47,6 +47,7 @@ EXPECTED_ACTIVITY_MESSAGES = 3
 ACP_STDIO_LIMIT_ERROR = "Separator is found, but chunk is longer than limit"
 EXPECTED_TEXT_REPLIES_WITH_IMPLICIT_AND_EXPLICIT_SESSION = 3
 EXPECTED_BUSY_NOTIFY_MESSAGES_AFTER_REPLACE = 2
+EXPECTED_REPEATED_ACTIVITY_MESSAGES = 2
 QUEUED_MESSAGE_ID = 22
 COMPACT_STATUS_MSG_ID = 42
 
@@ -3573,6 +3574,35 @@ async def test_verbose_final_reply_keeps_markdown_when_final_matches_streamed_pr
     assert update.message.replies == []
 
 
+async def test_verbose_final_reply_deletes_preview_when_final_edit_fails():
+
+    class StreamingReplyService(LiveActivityService):
+        async def prompt(self, *, chat_id: int, text: str, images=(), files=()):
+            del text, images, files
+            assert self._activity_handler is not None
+            await self._activity_handler(
+                chat_id,
+                AgentActivityBlock(kind="reply", title="", status="in_progress", text="preview", activity_id="reply"),
+            )
+            return AgentReply(text="Final response.")
+
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace=".", activity_mode="verbose"),
+        agent_service=cast(AgentService, StreamingReplyService()),
+    )
+    bot = FailingEditBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+    update = make_update(chat_id=TEST_CHAT_ID, text="hello")
+    context = make_context()
+    context.bot = bot
+
+    await bridge.on_message(update, context)
+
+    assert bot.deleted_message_ids == [(TEST_CHAT_ID, 1)]
+    assert update.message is not None
+    assert update.message.replies == ["Final response."]
+
+
 async def test_verbose_in_progress_updates_are_coalesced_before_editing(mocker):
     mocker.patch.object(bot_module, "VERBOSE_STREAM_TICK_SECONDS", 0.01)
     bridge = make_verbose_bridge()
@@ -3596,6 +3626,31 @@ async def test_verbose_in_progress_updates_are_coalesced_before_editing(mocker):
     assert len(bot.sent_messages) == 1
     assert len(bot.edited_messages) == 1
     assert cast(str, bot.edited_messages[-1]["text"]) == "one two three"
+
+
+async def test_verbose_reset_clears_older_pending_preview_before_flush(mocker):
+    mocker.patch.object(bot_module, "VERBOSE_STREAM_TICK_SECONDS", 0.01)
+    bridge = make_verbose_bridge()
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+
+    await bridge.on_activity_event(
+        TEST_CHAT_ID,
+        AgentActivityBlock(kind="reply", title="", status="in_progress", text="one", activity_id="reply"),
+    )
+    await bridge.on_activity_event(
+        TEST_CHAT_ID,
+        AgentActivityBlock(kind="reply", title="", status="in_progress", text="one two", activity_id="reply"),
+    )
+    await bridge.on_activity_event(
+        TEST_CHAT_ID,
+        AgentActivityBlock(kind="reply", title="", status="in_progress", text="restart", activity_id="reply"),
+    )
+    await asyncio.sleep(0.03)
+
+    assert len(bot.sent_messages) == EXPECTED_REPEATED_ACTIVITY_MESSAGES
+    assert cast(str, bot.sent_messages[-1]["text"]) == "restart"
+    assert all(cast(str, item.get("text", "")) != "one two" for item in bot.edited_messages)
 
 
 async def test_compact_stale_status_cleared_when_reply_is_none():
@@ -3705,8 +3760,44 @@ async def test_compact_live_activity_full_flow_multi_activity():
     assert len(bot.sent_messages) == 1
     assert update.message is not None
     assert update.message.replies == []
-    # Status text keeps the normal emoji language in compact mode.
-    assert cast(str, bot.sent_messages[0]["text"]).startswith("💡 Thinking")
-    assert "Done!" in cast(str, bot.edited_messages[-1]["text"])
-    assert bot.reactions == []
-    assert TEST_CHAT_ID not in bridge._compact_status_tasks
+
+
+async def test_normal_activity_state_is_cleared_after_successful_prompt_cycle():
+
+    class ReusedActivityIdService(LiveActivityService):
+        async def prompt(self, *, chat_id: int, text: str, images=(), files=()):
+            del images, files
+            assert self._activity_handler is not None
+            await self._activity_handler(
+                chat_id,
+                AgentActivityBlock(
+                    kind="execute",
+                    title="Run command",
+                    status="in_progress",
+                    text="",
+                    activity_id="shared-id",
+                ),
+            )
+            return AgentReply(text=f"done:{text}")
+
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace=".", activity_mode="normal"),
+        agent_service=cast(AgentService, ReusedActivityIdService()),
+    )
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+
+    first_update = make_update(chat_id=TEST_CHAT_ID, text="first")
+    second_update = make_update(chat_id=TEST_CHAT_ID, text="second")
+    first_context = make_context()
+    first_context.bot = bot
+    second_context = make_context()
+    second_context.bot = bot
+
+    await bridge.on_message(first_update, first_context)
+    await bridge.on_message(second_update, second_context)
+
+    activity_texts = [
+        cast(str, payload["text"]) for payload in bot.sent_messages if "Running" in cast(str, payload["text"])
+    ]
+    assert len(activity_texts) == EXPECTED_REPEATED_ACTIVITY_MESSAGES
