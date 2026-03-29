@@ -181,6 +181,40 @@ class EntityFailingEditBot(DummyBot):
         await super().edit_message_text(**kwargs)
 
 
+class NotModifiedError(TelegramError):
+    def __init__(self) -> None:
+        super().__init__("Bad Request: message is not modified")
+
+
+class NotModifiedAwareBot(DummyBot):
+    """Raises the Telegram not-modified error for identical edits."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._message_state: dict[int, dict[str, object]] = {}
+
+    async def send_message(self, **kwargs: object) -> SimpleNamespace:
+        message = await super().send_message(**kwargs)
+        self._message_state[message.message_id] = {
+            "text": kwargs.get("text"),
+            "entities": kwargs.get("entities"),
+            "reply_markup": kwargs.get("reply_markup"),
+        }
+        return message
+
+    async def edit_message_text(self, **kwargs: object) -> None:
+        message_id = cast(int, kwargs.get("message_id"))
+        next_state = {
+            "text": kwargs.get("text"),
+            "entities": kwargs.get("entities"),
+            "reply_markup": kwargs.get("reply_markup"),
+        }
+        if self._message_state.get(message_id) == next_state:
+            raise NotModifiedError
+        await super().edit_message_text(**kwargs)
+        self._message_state[message_id] = next_state
+
+
 class DummyCallbackQuery:
     def __init__(self, data: str) -> None:
         self.data = data
@@ -3416,6 +3450,17 @@ async def test_edit_markdown_in_chat_entity_edit_fails_falls_back_to_plain():
     assert "entities" not in bot.edited_messages[-1]
 
 
+async def test_edit_markdown_in_chat_treats_not_modified_as_success():
+
+    bot = NotModifiedAwareBot()
+    sent = await bot.send_message(chat_id=TEST_CHAT_ID, text="Hello")
+    result = await TelegramBridge._edit_markdown_in_chat(
+        bot=cast(Bot, bot), chat_id=TEST_CHAT_ID, message_id=sent.message_id, text="Hello"
+    )
+    assert result is True
+    assert bot.edited_messages == []
+
+
 async def test_edit_markdown_in_chat_returns_false_when_all_entity_edits_fail():
 
     bot = FailingEditBot()
@@ -3484,6 +3529,46 @@ async def test_verbose_final_reply_replaces_streamed_reply_preview_when_markdown
     assert cast(int, bot.edited_messages[0]["message_id"]) == 1
     assert cast(str, bot.edited_messages[0]["text"]) == "bold"
     assert bot.edited_messages[0]["entities"]
+    assert update.message is not None
+    assert update.message.replies == []
+
+
+async def test_verbose_final_reply_keeps_markdown_when_final_matches_streamed_preview():
+
+    class StableStreamingMarkdownReplyService(LiveActivityService):
+        async def prompt(self, *, chat_id: int, text: str, images=(), files=()):
+            del text, images, files
+            reply = (
+                'Sí, pero te conviene separar `"extraer emails plausibles"` de '
+                '`"validar RFC completo"`.\n\n'
+                "```python\n"
+                "print('ok')\n"
+                "```"
+            )
+            assert self._activity_handler is not None
+            await self._activity_handler(
+                chat_id,
+                AgentActivityBlock(kind="reply", title="", status="in_progress", text=reply, activity_id="reply"),
+            )
+            return AgentReply(text=reply)
+
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace=".", activity_mode="verbose"),
+        agent_service=cast(AgentService, StableStreamingMarkdownReplyService()),
+    )
+    bot = NotModifiedAwareBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
+    update = make_update(chat_id=TEST_CHAT_ID, text="hello")
+    context = make_context()
+    context.bot = bot
+
+    await bridge.on_message(update, context)
+
+    assert len(bot.sent_messages) == 1
+    assert bot.edited_messages == []
+    payload = bot.sent_messages[0]
+    assert "entities" in payload
+    assert payload["entities"]
     assert update.message is not None
     assert update.message.replies == []
 

@@ -664,6 +664,13 @@ async def test_acp_client_emits_incremental_updates_for_pending_reply_preview():
 
     assert events == [
         AgentActivityBlock(kind="reply", title="", status="in_progress", text="first thought", activity_id="reply"),
+        AgentActivityBlock(
+            kind="reply",
+            title="",
+            status="in_progress",
+            text="first thought continues",
+            activity_id="reply",
+        ),
     ]
 
 

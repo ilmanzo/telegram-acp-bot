@@ -92,7 +92,7 @@ SEARCH_LABEL_NEUTRAL = "🔎 Querying"
 REPLY_LABEL = "✍️ Replying"
 ACTIVITY_MODE_CHOICES: tuple[ActivityMode, ...] = ("normal", "compact", "verbose")
 ACTIVITY_MODE_HELP = "normal, compact, or verbose"
-VERBOSE_STREAM_TICK_SECONDS = 0.15
+VERBOSE_STREAM_TICK_SECONDS = 0.12
 
 
 @dataclass(slots=True, frozen=True)
@@ -1855,8 +1855,9 @@ class TelegramBridge:
                     entities=entities,
                     reply_markup=reply_markup,
                 )
-            except TelegramError:
-                pass
+            except TelegramError as exc:
+                if TelegramBridge._is_not_modified_error(exc):
+                    return True
             else:
                 return True
         try:
@@ -1866,8 +1867,8 @@ class TelegramBridge:
                 text=text,
                 reply_markup=reply_markup,
             )
-        except TelegramError:
-            return False
+        except TelegramError as exc:
+            return bool(TelegramBridge._is_not_modified_error(exc))
         return True
 
     @staticmethod
@@ -1911,8 +1912,8 @@ class TelegramBridge:
                 await bot.edit_message_text(
                     chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup
                 )
-            except TelegramError:
-                return False
+            except TelegramError as exc:
+                return bool(TelegramBridge._is_not_modified_error(exc))
             else:
                 return True
         if len(chunks) != 1:
@@ -1926,6 +1927,10 @@ class TelegramBridge:
             entities=chunk_entities,
             reply_markup=reply_markup,
         )
+
+    @staticmethod
+    def _is_not_modified_error(error: TelegramError) -> bool:
+        return "message is not modified" in str(error).lower()
 
     def _activity_workspace(self, *, chat_id: int) -> Path:
         return self._agent_service.get_workspace(chat_id=chat_id) or self._config.default_workspace
