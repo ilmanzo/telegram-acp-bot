@@ -1187,9 +1187,6 @@ class TelegramBridge:
             finally:
                 self._dequeued_prompts_by_chat.pop(chat_id, None)
 
-            if pending is None:
-                return
-
             with bind_log_context(chat_id=chat_id, prompt_cycle_id=pending.prompt_input.cycle_id):
                 logger.info("Dequeued pending prompt cycle")
             current_input = pending.prompt_input

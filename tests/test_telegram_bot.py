@@ -3746,6 +3746,31 @@ async def test_update_busy_notification_query_fallback_clears_reply_markup():
     assert callback.edited_kwargs["reply_markup"] is None
 
 
+async def test_update_busy_notification_falls_back_to_dismiss_when_query_edit_fails():
+    bridge = make_bridge()
+
+    class FailingBusyCallbackQuery(DummyCallbackQuery):
+        async def edit_message_text(self, text: str, **kwargs: object) -> None:
+            del text, kwargs
+            raise MarkdownFailureError
+
+    pending = _PendingPrompt(
+        prompt_input=_PromptInput(chat_id=TEST_CHAT_ID, text="queued", images=(), files=()),
+        update=cast(Update, make_update(chat_id=TEST_CHAT_ID, text="queued")),
+        token="queued-token",
+    )
+    callback = FailingBusyCallbackQuery(f"{BUSY_CALLBACK_PREFIX}|queued-token")
+
+    await bridge._update_busy_notification(
+        chat_id=TEST_CHAT_ID,
+        pending=pending,
+        query=cast(CallbackQuery, callback),
+        text=BUSY_SENT_TEXT,
+    )
+
+    assert callback.reply_markup_cleared
+
+
 @pytest.mark.parametrize("mode", ["normal", "compact", "verbose"])
 async def test_on_busy_callback_updates_stored_notification_when_query_edit_fails(mode: str):
     service = BlockingActivityService()
