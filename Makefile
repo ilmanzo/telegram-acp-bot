@@ -35,7 +35,8 @@ release-check: ## Ensure the current main commit is green in CI
 	@test "$$(git branch --show-current)" = "main" || { echo "release-check must run from main"; exit 1; }
 	@git fetch origin main --quiet
 	@test "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" || { echo "main must be up to date with origin/main"; exit 1; }
-	@commit=$$(git rev-parse HEAD); \
+	@set -e; \
+	commit=$$(git rev-parse HEAD); \
 	uv run python scripts/wait_for_ci.py --repo mgaitan/telegram-acp-bot --workflow CI --branch main --event push --commit "$$commit"; \
 	git fetch origin main --quiet; \
 	test "$$commit" = "$$(git rev-parse origin/main)" || { echo "main changed while waiting for CI"; exit 1; }

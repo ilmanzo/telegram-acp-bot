@@ -24,6 +24,7 @@ class WaitRequest:
     branch: str
     event: str
     commit: str
+    run_list_limit: int
     timeout_seconds: int
     poll_interval_seconds: int
 
@@ -85,9 +86,9 @@ def wait_for_green_ci(request: WaitRequest) -> int:
             workflow=request.workflow,
             branch=request.branch,
             event=request.event,
-            limit=20,
+            limit=request.run_list_limit,
         ):
-            if run.head_sha != request.commit:
+            if not run.head_sha.startswith(request.commit):
                 continue
 
             seen_run = True
@@ -118,22 +119,27 @@ def main() -> int:
     parser.add_argument("--workflow", required=True, help="Workflow name as shown in GitHub Actions.")
     parser.add_argument("--branch", default="main", help="Branch name to filter runs.")
     parser.add_argument("--event", default="push", help="GitHub event name to filter runs.")
-    parser.add_argument("--commit", required=True, help="Commit SHA to watch.")
+    parser.add_argument("--commit", required=True, help="Commit SHA or unique prefix to watch.")
+    parser.add_argument("--run-list-limit", type=int, default=50, help="Maximum number of workflow runs to inspect.")
     parser.add_argument("--timeout-seconds", type=int, default=900, help="Maximum time to wait.")
     parser.add_argument("--poll-interval-seconds", type=int, default=5, help="Polling interval.")
     args = parser.parse_args()
 
-    return wait_for_green_ci(
-        WaitRequest(
-            repo=args.repo,
-            workflow=args.workflow,
-            branch=args.branch,
-            event=args.event,
-            commit=args.commit,
-            timeout_seconds=args.timeout_seconds,
-            poll_interval_seconds=args.poll_interval_seconds,
+    try:
+        return wait_for_green_ci(
+            WaitRequest(
+                repo=args.repo,
+                workflow=args.workflow,
+                branch=args.branch,
+                event=args.event,
+                commit=args.commit,
+                run_list_limit=args.run_list_limit,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval_seconds=args.poll_interval_seconds,
+            )
         )
-    )
+    except subprocess.CalledProcessError as exc:
+        return exc.returncode or 1
 
 
 if __name__ == "__main__":
