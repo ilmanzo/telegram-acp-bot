@@ -103,7 +103,7 @@ async def test_activity_mode_base_handler_defaults():
         message="Permission request",
         keyboard=InlineKeyboardMarkup([]),
     )
-    assert await handler.finalize_reply(chat_id=TEST_CHAT_ID, update=cast(Update, make_update()), text="hello") is False
+    assert await handler.finalize_reply(chat_id=TEST_CHAT_ID, update=cast(Update, make_update()), text="hello") is None
     await handler.handle_empty_reply(chat_id=TEST_CHAT_ID)
     await handler.clear_chat_state(chat_id=TEST_CHAT_ID)
 
@@ -183,7 +183,7 @@ async def test_compact_and_verbose_handlers_return_early_without_app_or_reply_up
 
     assert (
         await verbose_handler.finalize_reply(chat_id=TEST_CHAT_ID, update=cast(Update, make_update()), text="hello")
-        is False
+        is None
     )
 
 

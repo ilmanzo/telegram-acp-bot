@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from telegram import Update
 
 from telegram_acp_bot.acp.models import (
     AgentActivityBlock,
@@ -33,9 +34,11 @@ from telegram_acp_bot.telegram.bot import AgentService, Application
 from telegram_acp_bot.telegram.bridge import TelegramBridge
 from telegram_acp_bot.telegram.config import make_config
 from tests.telegram.support import TEST_CHAT_ID, DummyBot
+from tests.telegram.support import DummyMessage as DummyBotMessage
 
 pytestmark = pytest.mark.asyncio
 ANCHOR_MESSAGE_ID = 42
+BOUND_REPLY_MESSAGE_ID = 11
 UNEXPECTED_EXECUTION_ERROR = "unexpected boom"
 
 
@@ -87,18 +90,21 @@ class FakeScheduler:
         self.stopped = True
 
 
-def make_task(
+def make_task(  # noqa: PLR0913
     *,
     task_id: str = "task-1",
     mode: ScheduledTaskMode = "notify",
+    session_id: str | None = "session-1",
     prompt_text: str | None = None,
     notify_text: str | None = "Ping now",
+    anchor_message_id: int | None = ANCHOR_MESSAGE_ID,
 ) -> ScheduledTask:
     now = datetime.now(UTC)
     return ScheduledTask(
         id=task_id,
         chat_id=TEST_CHAT_ID,
-        anchor_message_id=ANCHOR_MESSAGE_ID,
+        session_id=session_id,
+        anchor_message_id=anchor_message_id,
         mode=mode,
         prompt_text=prompt_text,
         notify_text=notify_text,
@@ -189,6 +195,58 @@ async def test_store_release_task_returns_running_task_to_pending(tmp_path: Path
     assert released is not None
     assert released.status == "pending"
     assert released.claimed_at is None
+
+
+async def test_store_binds_unanchored_tasks_for_chat_and_session(tmp_path: Path):
+    store = ScheduledTaskStore(tmp_path / "scheduled.sqlite3")
+    store.initialize()
+    task = store.create_task(
+        chat_id=TEST_CHAT_ID,
+        session_id="session-1",
+        mode="notify",
+        notify_text="first",
+        run_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    store.create_task(
+        chat_id=TEST_CHAT_ID,
+        session_id="session-2",
+        mode="notify",
+        notify_text="second",
+        run_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+
+    bound = store.bind_unanchored_tasks(
+        chat_id=TEST_CHAT_ID,
+        session_id="session-1",
+        anchor_message_id=ANCHOR_MESSAGE_ID,
+    )
+
+    stored = store.get_task(task.id)
+    assert bound == 1
+    assert stored is not None
+    assert stored.anchor_message_id == ANCHOR_MESSAGE_ID
+
+
+async def test_store_binds_unanchored_tasks_without_session_id(tmp_path: Path):
+    store = ScheduledTaskStore(tmp_path / "scheduled.sqlite3")
+    store.initialize()
+    task = store.create_task(
+        chat_id=TEST_CHAT_ID,
+        mode="notify",
+        notify_text="first",
+        run_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+
+    bound = store.bind_unanchored_tasks(
+        chat_id=TEST_CHAT_ID,
+        session_id=None,
+        anchor_message_id=ANCHOR_MESSAGE_ID,
+    )
+
+    stored = store.get_task(task.id)
+    assert bound == 1
+    assert stored is not None
+    assert stored.anchor_message_id == ANCHOR_MESSAGE_ID
 
 
 async def test_scheduler_marks_task_done_on_success(tmp_path: Path):
@@ -326,9 +384,52 @@ async def test_execute_scheduled_prompt_replies_to_anchor_message():
 
     assert service.prompt_calls == [(TEST_CHAT_ID, "check again")]
     assert bot.actions == [(TEST_CHAT_ID, "typing")]
-    assert [item["text"] for item in bot.edited_messages] == ["Running now...", "Completed."]
     assert bot.sent_messages[-1]["text"] == "Scheduled reply"
     assert bot.sent_messages[-1]["reply_to_message_id"] == ANCHOR_MESSAGE_ID
+
+
+async def test_dispatch_reply_binds_unanchored_scheduled_tasks(tmp_path: Path):
+    store = ScheduledTaskStore(tmp_path / "scheduled.sqlite3")
+    store.initialize()
+    task = store.create_task(
+        chat_id=TEST_CHAT_ID,
+        session_id="session-1",
+        mode="notify",
+        notify_text="Ping later",
+        run_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    service = ScheduledPromptService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=cast(AgentService, service),
+        scheduled_task_store=store,
+    )
+    update = cast(Update, SimpleNamespace(message=DummyBotMessage("schedule", message_id=10)))
+
+    await bridge._dispatch_reply(chat_id=TEST_CHAT_ID, update=update, reply=AgentReply(text="Scheduled for later"))
+
+    stored = store.get_task(task.id)
+    assert stored is not None
+    assert stored.anchor_message_id == BOUND_REPLY_MESSAGE_ID
+
+
+async def test_bind_pending_scheduled_tasks_logs_and_continues_on_store_error(mocker):
+    service = ScheduledPromptService()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=cast(AgentService, service),
+        scheduled_task_store=cast(ScheduledTaskStore, mocker.Mock()),
+    )
+    mocker.patch.object(
+        bridge._scheduled_task_store,
+        "bind_unanchored_tasks",
+        side_effect=RuntimeError("bind boom"),
+    )
+    log_exception = mocker.patch("telegram_acp_bot.telegram.bridge.logger.exception")
+
+    await bridge._bind_pending_scheduled_tasks(chat_id=TEST_CHAT_ID, anchor_message_id=ANCHOR_MESSAGE_ID)
+
+    log_exception.assert_called_once()
 
 
 async def test_execute_scheduled_prompt_defers_while_chat_is_busy():
@@ -348,7 +449,7 @@ async def test_execute_scheduled_prompt_defers_while_chat_is_busy():
     finally:
         lock.release()
 
-    assert bot.edited_messages == []
+    assert bot.sent_messages == []
     assert service.prompt_calls == []
 
 
@@ -362,33 +463,30 @@ async def test_execute_scheduled_notification_requires_running_app():
         await bridge.execute_scheduled_task(make_task(mode="notify"))
 
 
-async def test_execute_scheduled_notification_falls_back_to_reply_message(mocker):
+async def test_execute_scheduled_notification_requires_anchor_message():
     bridge = TelegramBridge(
         config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
         agent_service=cast(AgentService, ScheduledPromptService()),
     )
     bot = DummyBot()
     bridge._app = cast(Application, SimpleNamespace(bot=bot))
-    mocker.patch.object(bridge, "_edit_scheduled_anchor", side_effect=[True, False])
+
+    with pytest.raises(ScheduledTaskExecutionError, match="anchor message"):
+        await bridge.execute_scheduled_task(make_task(mode="notify", anchor_message_id=None))
+
+
+async def test_execute_scheduled_notification_replies_to_anchor_message():
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=cast(AgentService, ScheduledPromptService()),
+    )
+    bot = DummyBot()
+    bridge._app = cast(Application, SimpleNamespace(bot=bot))
 
     await bridge.execute_scheduled_task(make_task(mode="notify", notify_text="Ping now"))
 
     assert bot.sent_messages[-1]["text"] == "Ping now"
     assert bot.sent_messages[-1]["reply_to_message_id"] == ANCHOR_MESSAGE_ID
-
-
-async def test_execute_scheduled_notification_returns_when_anchor_edit_succeeds(mocker):
-    bridge = TelegramBridge(
-        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
-        agent_service=cast(AgentService, ScheduledPromptService()),
-    )
-    bot = DummyBot()
-    bridge._app = cast(Application, SimpleNamespace(bot=bot))
-    mocker.patch.object(bridge, "_edit_scheduled_anchor", side_effect=[True, True])
-
-    await bridge.execute_scheduled_task(make_task(mode="notify", notify_text="Ping now"))
-
-    assert bot.sent_messages == []
 
 
 async def test_execute_scheduled_prompt_requires_running_app():
@@ -412,7 +510,8 @@ async def test_execute_scheduled_prompt_reports_missing_session():
     with pytest.raises(ScheduledTaskExecutionError, match="no active session"):
         await bridge.execute_scheduled_task(make_task(mode="prompt_agent", prompt_text="check again"))
 
-    assert bot.edited_messages[-1]["text"] == "Could not run automatically: no active session."
+    assert bot.sent_messages[-1]["text"] == "Could not run automatically: no active session."
+    assert bot.sent_messages[-1]["reply_to_message_id"] == ANCHOR_MESSAGE_ID
 
 
 async def test_execute_scheduled_prompt_rejects_empty_prompt():
@@ -426,7 +525,8 @@ async def test_execute_scheduled_prompt_rejects_empty_prompt():
     with pytest.raises(ScheduledTaskExecutionError, match="scheduled prompt is empty"):
         await bridge.execute_scheduled_task(make_task(mode="prompt_agent", prompt_text="   "))
 
-    assert bot.edited_messages[-1]["text"] == "Could not run automatically: scheduled prompt is empty."
+    assert bot.sent_messages[-1]["text"] == "Could not run automatically: scheduled prompt is empty."
+    assert bot.sent_messages[-1]["reply_to_message_id"] == ANCHOR_MESSAGE_ID
 
 
 async def test_execute_scheduled_prompt_reports_output_limit_error():
@@ -440,7 +540,8 @@ async def test_execute_scheduled_prompt_reports_output_limit_error():
     with pytest.raises(ScheduledTaskExecutionError, match="ACP stdio limit"):
         await bridge.execute_scheduled_task(make_task(mode="prompt_agent", prompt_text="check again"))
 
-    assert bot.edited_messages[-1]["text"] == "Could not run automatically: agent output exceeded ACP stdio limit."
+    assert bot.sent_messages[-1]["text"] == "Could not run automatically: agent output exceeded ACP stdio limit."
+    assert bot.sent_messages[-1]["reply_to_message_id"] == ANCHOR_MESSAGE_ID
 
 
 async def test_execute_scheduled_prompt_reports_generic_error():
@@ -454,7 +555,8 @@ async def test_execute_scheduled_prompt_reports_generic_error():
     with pytest.raises(ScheduledTaskExecutionError, match="agent boom"):
         await bridge.execute_scheduled_task(make_task(mode="prompt_agent", prompt_text="check again"))
 
-    assert bot.edited_messages[-1]["text"] == "Could not run automatically: agent boom"
+    assert bot.sent_messages[-1]["text"] == "Could not run automatically: agent boom"
+    assert bot.sent_messages[-1]["reply_to_message_id"] == ANCHOR_MESSAGE_ID
 
 
 async def test_execute_scheduled_prompt_reports_empty_agent_reply():
@@ -468,7 +570,8 @@ async def test_execute_scheduled_prompt_reports_empty_agent_reply():
     with pytest.raises(ScheduledTaskExecutionError, match="no active session"):
         await bridge.execute_scheduled_task(make_task(mode="prompt_agent", prompt_text="check again"))
 
-    assert bot.edited_messages[-1]["text"] == "Could not run automatically: no active session."
+    assert bot.sent_messages[-1]["text"] == "Could not run automatically: no active session."
+    assert bot.sent_messages[-1]["reply_to_message_id"] == ANCHOR_MESSAGE_ID
 
 
 async def test_execute_scheduled_prompt_reports_delivery_failure(mocker):
@@ -483,7 +586,8 @@ async def test_execute_scheduled_prompt_reports_delivery_failure(mocker):
     with pytest.raises(ScheduledTaskExecutionError, match="Could not deliver scheduled reply: send boom"):
         await bridge.execute_scheduled_task(make_task(mode="prompt_agent", prompt_text="check again"))
 
-    assert bot.edited_messages[-1]["text"] == "Could not deliver scheduled reply: send boom"
+    assert bot.sent_messages[-1]["text"] == "Could not deliver scheduled reply: send boom"
+    assert bot.sent_messages[-1]["reply_to_message_id"] == ANCHOR_MESSAGE_ID
 
 
 async def test_send_agent_reply_to_chat_requires_running_app():
@@ -500,14 +604,14 @@ async def test_send_agent_reply_to_chat_requires_running_app():
         )
 
 
-async def test_edit_scheduled_anchor_requires_running_app():
+async def test_send_scheduled_status_message_requires_running_app():
     bridge = TelegramBridge(
         config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
         agent_service=cast(AgentService, ScheduledPromptService()),
     )
 
     with pytest.raises(ScheduledTaskExecutionError, match="application is not running"):
-        await bridge._edit_scheduled_anchor(task=make_task(), text="Running now...")
+        await bridge._send_scheduled_status_message(task=make_task(), text="Running now...")
 
 
 async def test_send_agent_reply_to_chat_sends_attachments_and_text():

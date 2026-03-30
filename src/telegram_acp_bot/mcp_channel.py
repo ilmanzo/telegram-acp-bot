@@ -11,7 +11,7 @@ import binascii
 import mimetypes
 import os
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import cast
@@ -30,6 +30,9 @@ from telegram_acp_bot.scheduled_tasks.store import parse_utc_timestamp
 
 ALLOW_PATH_ENV = "ACP_TELEGRAM_CHANNEL_ALLOW_PATH"
 MISSING_SCHEDULED_DB_ERROR = f"missing {ACP_SCHEDULED_TASKS_DB_ENV}"
+RUN_AT_OR_DELAY_ERROR = "provide run_at or at least one delay input"
+MIXED_RUN_AT_AND_DELAY_ERROR = "provide either run_at or delay inputs, not both"
+NEGATIVE_DELAY_ERROR = "delay inputs must be zero or positive"
 
 mcp = FastMCP(
     name="telegram-channel",
@@ -119,15 +122,17 @@ async def telegram_send_attachment(
     name="schedule_task",
     description=(
         "Schedule a one-shot deferred follow-up for the current Telegram chat. "
-        "Use an ISO 8601 timestamp with an explicit timezone offset."
+        "Prefer relative delay inputs for requests such as 'in 30 seconds' or 'in 10 minutes'."
     ),
 )
 async def schedule_task(  # noqa: PLR0911,PLR0913
-    run_at: str,
     mode: str,
+    run_at: str | None = None,
+    delay_seconds: int | None = None,
+    delay_minutes: int | None = None,
+    delay_hours: int | None = None,
     prompt_text: str | None = None,
     notify_text: str | None = None,
-    reply_to_message_id: int | None = None,
     session_id: str | None = None,
 ) -> dict[str, object]:
     def fail(error: str) -> dict[str, object]:
@@ -145,21 +150,14 @@ async def schedule_task(  # noqa: PLR0911,PLR0913
         return fail("prompt_agent mode requires prompt_text")
 
     try:
-        run_at_dt = parse_utc_timestamp(run_at)
+        run_at_dt = _resolve_run_at(
+            run_at=run_at,
+            delay_seconds=delay_seconds,
+            delay_minutes=delay_minutes,
+            delay_hours=delay_hours,
+        )
     except ValueError as exc:
         return fail(str(exc))
-
-    bot = Bot(token=context.token)
-    anchor_text = _format_scheduled_anchor_text(run_at_dt)
-    if isinstance(reply_to_message_id, int):
-        anchor_message = await bot.send_message(
-            chat_id=context.chat_id,
-            text=anchor_text,
-            reply_to_message_id=reply_to_message_id,
-            allow_sending_without_reply=True,
-        )
-    else:
-        anchor_message = await bot.send_message(chat_id=context.chat_id, text=anchor_text)
 
     try:
         store = _load_scheduled_task_store()
@@ -167,7 +165,7 @@ async def schedule_task(  # noqa: PLR0911,PLR0913
         return fail(str(exc))
     task = store.create_task(
         chat_id=context.chat_id,
-        anchor_message_id=anchor_message.message_id,
+        session_id=context.session_id,
         mode=cast(ScheduledTaskMode, mode),
         prompt_text=prompt_text,
         notify_text=notify_text,
@@ -179,7 +177,7 @@ async def schedule_task(  # noqa: PLR0911,PLR0913
         "chat_id": task.chat_id,
         "anchor_message_id": task.anchor_message_id,
         "run_at": task.run_at.isoformat(),
-        "summary": anchor_text,
+        "summary": _format_scheduled_summary(run_at_dt),
     }
 
 
@@ -253,9 +251,33 @@ def _load_scheduled_task_store() -> ScheduledTaskStore:
     return store
 
 
-def _format_scheduled_anchor_text(run_at: datetime) -> str:
+def _format_scheduled_summary(run_at: datetime) -> str:
     timestamp = run_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
     return f"Scheduled for {timestamp}."
+
+
+def _resolve_run_at(
+    *,
+    run_at: str | None,
+    delay_seconds: int | None,
+    delay_minutes: int | None,
+    delay_hours: int | None,
+) -> datetime:
+    delays = [value for value in (delay_seconds, delay_minutes, delay_hours) if value is not None]
+    if run_at is not None and delays:
+        raise ValueError(MIXED_RUN_AT_AND_DELAY_ERROR)
+    if run_at is not None:
+        return parse_utc_timestamp(run_at)
+    if not delays:
+        raise ValueError(RUN_AT_OR_DELAY_ERROR)
+    if any(value < 0 for value in delays):
+        raise ValueError(NEGATIVE_DELAY_ERROR)
+    delta = timedelta(
+        seconds=0 if delay_seconds is None else delay_seconds,
+        minutes=0 if delay_minutes is None else delay_minutes,
+        hours=0 if delay_hours is None else delay_hours,
+    )
+    return datetime.now(UTC) + delta
 
 
 def _allow_path_inputs() -> bool:

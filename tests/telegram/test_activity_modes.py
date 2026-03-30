@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from tests.telegram.support import *
 
+SECOND_REPLY_MESSAGE_ID = 2
+
 
 async def test_make_config_compact_activity_defaults_to_false():
     config = make_config(token="T", allowed_user_ids=[1], workspace=".")
@@ -400,7 +402,7 @@ async def test_verbose_finalize_reply_handles_empty_text_and_empty_chunks(mocker
         ),
     )
 
-    assert await handler.finalize_reply(chat_id=TEST_CHAT_ID, update=cast(Update, make_update()), text="") is True
+    assert await handler.finalize_reply(chat_id=TEST_CHAT_ID, update=cast(Update, make_update()), text="") == 1
 
     handler._store_message(
         chat_id=TEST_CHAT_ID,
@@ -418,7 +420,7 @@ async def test_verbose_finalize_reply_handles_empty_text_and_empty_chunks(mocker
         await handler.finalize_reply(
             chat_id=TEST_CHAT_ID, update=cast(Update, make_update()), text="still empty chunks"
         )
-        is True
+        == SECOND_REPLY_MESSAGE_ID
     )
 
 
@@ -580,7 +582,7 @@ async def test_verbose_internal_helpers_cover_remaining_branches(mocker):
     bot = DummyBot()
     bridge._app = cast(Application, SimpleNamespace(bot=bot))
 
-    assert await handler.finalize_reply(chat_id=TEST_CHAT_ID, update=cast(Update, make_update()), text="hello") is False
+    assert await handler.finalize_reply(chat_id=TEST_CHAT_ID, update=cast(Update, make_update()), text="hello") is None
 
     handler._clear_message(chat_id=TEST_CHAT_ID, slot_key="missing")
 

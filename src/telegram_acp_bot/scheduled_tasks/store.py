@@ -72,7 +72,8 @@ class ScheduledTaskStore:
                 CREATE TABLE IF NOT EXISTS scheduled_tasks (
                     id TEXT PRIMARY KEY,
                     chat_id INTEGER NOT NULL,
-                    anchor_message_id INTEGER NOT NULL,
+                    session_id TEXT,
+                    anchor_message_id INTEGER,
                     mode TEXT NOT NULL,
                     prompt_text TEXT,
                     notify_text TEXT,
@@ -101,7 +102,8 @@ class ScheduledTaskStore:
         self,
         *,
         chat_id: int,
-        anchor_message_id: int,
+        session_id: str | None = None,
+        anchor_message_id: int | None = None,
         mode: ScheduledTaskMode,
         run_at: datetime,
         prompt_text: str | None = None,
@@ -113,6 +115,7 @@ class ScheduledTaskStore:
         task = ScheduledTask(
             id=uuid4().hex,
             chat_id=chat_id,
+            session_id=session_id,
             anchor_message_id=anchor_message_id,
             mode=mode,
             prompt_text=prompt_text,
@@ -133,6 +136,7 @@ class ScheduledTaskStore:
                 INSERT INTO scheduled_tasks (
                     id,
                     chat_id,
+                    session_id,
                     anchor_message_id,
                     mode,
                     prompt_text,
@@ -147,7 +151,7 @@ class ScheduledTaskStore:
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 self._serialize_task(task),
             )
@@ -174,7 +178,7 @@ class ScheduledTaskStore:
                 """
                 SELECT id
                 FROM scheduled_tasks
-                WHERE status = 'pending' AND run_at <= ?
+                WHERE status = 'pending' AND anchor_message_id IS NOT NULL AND run_at <= ?
                 ORDER BY run_at, created_at
                 LIMIT ?
                 """,
@@ -280,6 +284,43 @@ class ScheduledTaskStore:
             )
         return cursor.rowcount
 
+    def bind_unanchored_tasks(
+        self,
+        *,
+        chat_id: int,
+        session_id: str | None,
+        anchor_message_id: int,
+    ) -> int:
+        """Attach pending unanchored tasks for the current chat/session to one anchor message."""
+
+        now = format_utc_timestamp(utc_now())
+        with self._connect() as connection:
+            if session_id is None:
+                cursor = connection.execute(
+                    """
+                    UPDATE scheduled_tasks
+                    SET anchor_message_id = ?, updated_at = ?
+                    WHERE chat_id = ?
+                      AND status = 'pending'
+                      AND anchor_message_id IS NULL
+                      AND session_id IS NULL
+                    """,
+                    (anchor_message_id, now, chat_id),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE scheduled_tasks
+                    SET anchor_message_id = ?, updated_at = ?
+                    WHERE chat_id = ?
+                      AND status = 'pending'
+                      AND anchor_message_id IS NULL
+                      AND session_id = ?
+                    """,
+                    (anchor_message_id, now, chat_id, session_id),
+                )
+        return cursor.rowcount
+
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self._path)
@@ -297,6 +338,7 @@ class ScheduledTaskStore:
         return (
             task.id,
             task.chat_id,
+            task.session_id,
             task.anchor_message_id,
             task.mode,
             task.prompt_text,
@@ -321,7 +363,8 @@ class ScheduledTaskStore:
         return ScheduledTask(
             id=str(row["id"]),
             chat_id=int(row["chat_id"]),
-            anchor_message_id=int(row["anchor_message_id"]),
+            session_id=None if row["session_id"] is None else str(row["session_id"]),
+            anchor_message_id=None if row["anchor_message_id"] is None else int(row["anchor_message_id"]),
             mode=cast(ScheduledTaskMode, str(row["mode"])),
             prompt_text=None if row["prompt_text"] is None else str(row["prompt_text"]),
             notify_text=None if row["notify_text"] is None else str(row["notify_text"]),

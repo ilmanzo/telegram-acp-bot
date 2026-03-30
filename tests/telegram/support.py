@@ -95,6 +95,7 @@ class DummyMessage:
         self.caption = caption
         self.photo = list(photo) if photo is not None else []
         self.document = document
+        self._next_reply_message_id = message_id + 1
         self.replies: list[str] = []
         self.reply_kwargs: list[dict[str, object]] = []
         self.fail_markdown = False
@@ -102,7 +103,7 @@ class DummyMessage:
         self.photos: list[object] = []
         self.documents: list[object] = []
 
-    async def reply_text(self, text: str, **kwargs: object) -> None:
+    async def reply_text(self, text: str, **kwargs: object) -> SimpleNamespace:
         if self.fail_markdown and kwargs.get("parse_mode") is not None:
             self.reply_kwargs.append(kwargs)
             raise MarkdownFailureError
@@ -111,6 +112,9 @@ class DummyMessage:
             raise MarkdownFailureError
         self.reply_kwargs.append(kwargs)
         self.replies.append(text)
+        reply = SimpleNamespace(message_id=self._next_reply_message_id)
+        self._next_reply_message_id += 1
+        return reply
 
     async def reply_photo(self, *, photo: object) -> None:
         self.photos.append(photo)

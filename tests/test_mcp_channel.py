@@ -22,7 +22,6 @@ from telegram_acp_bot.scheduled_tasks import ACP_SCHEDULED_TASKS_DB_ENV, Schedul
 
 STATE_FILE_PRIVATE_MODE = 0o600
 TEST_SCHEDULED_CHAT_ID = 123
-TEST_ANCHOR_MESSAGE_ID = 77
 
 
 def test_telegram_channel_info_reports_active_capabilities():
@@ -305,20 +304,13 @@ def test_state_file_atomic_write_removes_temp_file_on_replace_error(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_schedule_task_creates_anchor_message_and_persists_task(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mocker,
-):
+async def test_schedule_task_persists_unanchored_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     state_file = tmp_path / "state.json"
     scheduled_db = tmp_path / "scheduled.sqlite3"
     save_session_chat_map(state_file, {"s1": 123})
     monkeypatch.setenv(TOKEN_ENV, "TOKEN")
     monkeypatch.setenv(STATE_FILE_ENV, str(state_file))
     monkeypatch.setenv(ACP_SCHEDULED_TASKS_DB_ENV, str(scheduled_db))
-    bot = mocker.AsyncMock()
-    bot.send_message.return_value = mocker.Mock(message_id=TEST_ANCHOR_MESSAGE_ID)
-    mocker.patch("telegram_acp_bot.mcp_channel.Bot", return_value=bot)
 
     result = await mcp_channel.schedule_task(
         run_at="2026-03-30T21:00:00+00:00",
@@ -330,10 +322,11 @@ async def test_schedule_task_creates_anchor_message_and_persists_task(
     task = store.get_task(result["task_id"])
 
     assert result["ok"] is True
-    assert result["anchor_message_id"] == TEST_ANCHOR_MESSAGE_ID
+    assert result["anchor_message_id"] is None
     assert task is not None
     assert task.chat_id == TEST_SCHEDULED_CHAT_ID
-    assert task.anchor_message_id == TEST_ANCHOR_MESSAGE_ID
+    assert task.session_id == "s1"
+    assert task.anchor_message_id is None
     assert task.mode == "notify"
     assert task.notify_text == "Review the PR now"
 
@@ -419,10 +412,31 @@ async def test_schedule_task_requires_prompt_text_for_prompt_agent_mode(
 
 
 @pytest.mark.asyncio
-async def test_schedule_task_replies_to_specific_message_when_requested(
+async def test_schedule_task_accepts_relative_delay_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    state_file = tmp_path / "state.json"
+    scheduled_db = tmp_path / "scheduled.sqlite3"
+    save_session_chat_map(state_file, {"s1": TEST_SCHEDULED_CHAT_ID})
+    monkeypatch.setenv(TOKEN_ENV, "TOKEN")
+    monkeypatch.setenv(STATE_FILE_ENV, str(state_file))
+    monkeypatch.setenv(ACP_SCHEDULED_TASKS_DB_ENV, str(scheduled_db))
+
+    before = mcp_channel.datetime.now(mcp_channel.UTC)
+    result = await mcp_channel.schedule_task(
+        mode="notify",
+        notify_text="Review the PR now",
+        delay_minutes=10,
+    )
+    after = mcp_channel.datetime.now(mcp_channel.UTC)
+    scheduled = mcp_channel.parse_utc_timestamp(str(result["run_at"]))
+
+    assert result["ok"] is True
+    assert before <= scheduled - mcp_channel.timedelta(minutes=10) <= after
+
+
+@pytest.mark.asyncio
+async def test_schedule_task_rejects_mixed_absolute_and_relative_inputs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    mocker,
 ):
     state_file = tmp_path / "state.json"
     scheduled_db = tmp_path / "scheduled.sqlite3"
@@ -430,39 +444,71 @@ async def test_schedule_task_replies_to_specific_message_when_requested(
     monkeypatch.setenv(TOKEN_ENV, "TOKEN")
     monkeypatch.setenv(STATE_FILE_ENV, str(state_file))
     monkeypatch.setenv(ACP_SCHEDULED_TASKS_DB_ENV, str(scheduled_db))
-    bot = mocker.AsyncMock()
-    bot.send_message.return_value = mocker.Mock(message_id=TEST_ANCHOR_MESSAGE_ID)
-    mocker.patch("telegram_acp_bot.mcp_channel.Bot", return_value=bot)
 
-    await mcp_channel.schedule_task(
+    result = await mcp_channel.schedule_task(
         run_at="2026-03-30T21:00:00+00:00",
         mode="notify",
         notify_text="Review the PR now",
-        reply_to_message_id=9,
+        delay_seconds=30,
     )
 
-    bot.send_message.assert_awaited_once_with(
-        chat_id=TEST_SCHEDULED_CHAT_ID,
-        text="Scheduled for 2026-03-30 21:00 UTC.",
-        reply_to_message_id=9,
-        allow_sending_without_reply=True,
+    assert result["ok"] is False
+    assert result["error"] == "provide either run_at or delay inputs, not both"
+
+
+@pytest.mark.asyncio
+async def test_schedule_task_requires_absolute_or_relative_time_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    state_file = tmp_path / "state.json"
+    scheduled_db = tmp_path / "scheduled.sqlite3"
+    save_session_chat_map(state_file, {"s1": TEST_SCHEDULED_CHAT_ID})
+    monkeypatch.setenv(TOKEN_ENV, "TOKEN")
+    monkeypatch.setenv(STATE_FILE_ENV, str(state_file))
+    monkeypatch.setenv(ACP_SCHEDULED_TASKS_DB_ENV, str(scheduled_db))
+
+    result = await mcp_channel.schedule_task(
+        mode="notify",
+        notify_text="Review the PR now",
     )
+
+    assert result["ok"] is False
+    assert result["error"] == "provide run_at or at least one delay input"
+
+
+@pytest.mark.asyncio
+async def test_schedule_task_rejects_negative_delay_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    state_file = tmp_path / "state.json"
+    scheduled_db = tmp_path / "scheduled.sqlite3"
+    save_session_chat_map(state_file, {"s1": TEST_SCHEDULED_CHAT_ID})
+    monkeypatch.setenv(TOKEN_ENV, "TOKEN")
+    monkeypatch.setenv(STATE_FILE_ENV, str(state_file))
+    monkeypatch.setenv(ACP_SCHEDULED_TASKS_DB_ENV, str(scheduled_db))
+
+    result = await mcp_channel.schedule_task(
+        mode="notify",
+        notify_text="Review the PR now",
+        delay_seconds=-1,
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "delay inputs must be zero or positive"
 
 
 @pytest.mark.asyncio
 async def test_schedule_task_reports_missing_scheduled_db_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    mocker,
 ):
     state_file = tmp_path / "state.json"
     save_session_chat_map(state_file, {"s1": TEST_SCHEDULED_CHAT_ID})
     monkeypatch.setenv(TOKEN_ENV, "TOKEN")
     monkeypatch.setenv(STATE_FILE_ENV, str(state_file))
     monkeypatch.delenv(ACP_SCHEDULED_TASKS_DB_ENV, raising=False)
-    bot = mocker.AsyncMock()
-    bot.send_message.return_value = mocker.Mock(message_id=TEST_ANCHOR_MESSAGE_ID)
-    mocker.patch("telegram_acp_bot.mcp_channel.Bot", return_value=bot)
 
     result = await mcp_channel.schedule_task(
         run_at="2026-03-30T21:00:00+00:00",

@@ -271,9 +271,10 @@ def main(args: list[str] | None = None) -> int:
         stdio_limit=opts.acp_stdio_limit,
         connect_timeout=opts.acp_connect_timeout,
     )
-    bridge = TelegramBridge(config=config, agent_service=service)
+    scheduled_task_store = ScheduledTaskStore(scheduled_tasks_db)
+    bridge = TelegramBridge(config=config, agent_service=service, scheduled_task_store=scheduled_task_store)
     scheduler = ScheduledTaskScheduler(
-        store=ScheduledTaskStore(scheduled_tasks_db),
+        store=scheduled_task_store,
         runner=ScheduledTaskRunner(bridge.execute_scheduled_task),
     )
     return _run_bot_loop(config, bridge, scheduler, restart_command_parts)

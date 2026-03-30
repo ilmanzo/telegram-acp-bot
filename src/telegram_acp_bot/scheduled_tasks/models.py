@@ -18,7 +18,8 @@ class ScheduledTask:
 
     id: str
     chat_id: int
-    anchor_message_id: int
+    session_id: str | None
+    anchor_message_id: int | None
     mode: ScheduledTaskMode
     prompt_text: str | None
     notify_text: str | None

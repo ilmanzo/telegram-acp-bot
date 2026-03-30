@@ -49,7 +49,12 @@ from telegram_acp_bot.acp.models import (
     ResumableSession,
 )
 from telegram_acp_bot.logging_context import bind_log_context, log_text_preview
-from telegram_acp_bot.scheduled_tasks import ScheduledTask, ScheduledTaskDeferredError, ScheduledTaskExecutionError
+from telegram_acp_bot.scheduled_tasks import (
+    ScheduledTask,
+    ScheduledTaskDeferredError,
+    ScheduledTaskExecutionError,
+    ScheduledTaskStore,
+)
 from telegram_acp_bot.telegram.activity import (
     _ActivityModeHandler,
     _CompactActivityModeHandler,
@@ -90,14 +95,22 @@ from telegram_acp_bot.telegram.models import (
 logger = logging.getLogger(__name__)
 APP_NOT_RUNNING_ERROR = "application is not running"
 SCHEDULED_CHAT_BUSY_ERROR = "chat is busy"
+SCHEDULED_MISSING_ANCHOR_ERROR = "scheduled task is missing an anchor message"
 
 
 class TelegramBridge:
     """Telegram command and message handlers for the MVP bot."""
 
-    def __init__(self, config: BotConfig, agent_service: AgentService) -> None:
+    def __init__(
+        self,
+        config: BotConfig,
+        agent_service: AgentService,
+        *,
+        scheduled_task_store: ScheduledTaskStore | None = None,
+    ) -> None:
         self._config = config
         self._agent_service = agent_service
+        self._scheduled_task_store = scheduled_task_store
         self._app: Application | None = None
         self._restart_requested = False
         self._activity_mode_by_chat: dict[int, ActivityMode] = {}
@@ -709,17 +722,20 @@ class TelegramBridge:
                 await self._reply_activity_block(update, block, workspace=workspace)
         await self._send_attachments(update, reply)
         if reply.text.strip():
-            handled = await self._activity_handler(chat_id=chat_id).finalize_reply(
+            anchor_message_id = await self._activity_handler(chat_id=chat_id).finalize_reply(
                 chat_id=chat_id,
                 update=update,
                 text=reply.text,
             )
-            if not handled:
-                await self._reply_agent(update, reply.text)
+            if anchor_message_id is None:
+                sent_message = await self._reply_agent(update, reply.text)
+                anchor_message_id = None if sent_message is None else sent_message.message_id
+            if anchor_message_id is not None:
+                await self._bind_pending_scheduled_tasks(chat_id=chat_id, anchor_message_id=anchor_message_id)
         else:
             await self._activity_handler(chat_id=chat_id).handle_empty_reply(chat_id=chat_id)
 
-    async def _finalize_compact_reply(self, *, chat_id: int, update: Update, text: str) -> None:
+    async def _finalize_compact_reply(self, *, chat_id: int, update: Update, text: str) -> int | None:
         """Replace the compact in-progress status message with the final reply.
 
         Edits the status message in place when possible. Falls back to deleting it
@@ -735,10 +751,11 @@ class TelegramBridge:
                 bot=app.bot, chat_id=chat_id, message_id=status_msg_id, text=text
             )
             if success:
-                return
+                return status_msg_id
             with suppress(TelegramError):
                 await app.bot.delete_message(chat_id=chat_id, message_id=status_msg_id)
-        await self._reply_agent(update, text)
+        sent_message = await self._reply_agent(update, text)
+        return None if sent_message is None else sent_message.message_id
 
     async def _clear_compact_status(self, chat_id: int) -> None:
         """Delete the in-progress compact status message if one exists."""
@@ -1220,16 +1237,16 @@ class TelegramBridge:
         return _RestartArgs(resume_index=resume_index, workspace=workspace)
 
     @staticmethod
-    async def _reply(update: Update, text: str) -> None:
+    async def _reply(update: Update, text: str) -> Message | None:
         if update.message is None:
-            return
-        await TelegramBridge._reply_markdown_message(update.message, text=text)
+            return None
+        return await TelegramBridge._reply_markdown_message(update.message, text=text)
 
     @staticmethod
-    async def _reply_agent(update: Update, text: str) -> None:
+    async def _reply_agent(update: Update, text: str) -> Message | None:
         if update.message is None:
-            return
-        await TelegramBridge._reply_markdown_message(update.message, text=text)
+            return None
+        return await TelegramBridge._reply_markdown_message(update.message, text=text)
 
     @staticmethod
     def _to_telegram_entity(entity: MarkdownMessageEntity) -> MessageEntity:
@@ -1414,18 +1431,22 @@ class TelegramBridge:
         return f"{fence}\n{text}\n{fence}"
 
     @staticmethod
-    async def _reply_markdown_message(message: Message, *, text: str) -> None:
+    async def _reply_markdown_message(message: Message, *, text: str) -> Message | None:
+        first_message: Message | None = None
         try:
             for chunk_text, chunk_entities in TelegramBridge._render_markdown_chunks(text):
                 if chunk_entities:
                     try:
-                        await message.reply_text(chunk_text, entities=chunk_entities)
+                        sent_message = await message.reply_text(chunk_text, entities=chunk_entities)
                     except TelegramError:
-                        await message.reply_text(chunk_text)
+                        sent_message = await message.reply_text(chunk_text)
                 else:
-                    await message.reply_text(chunk_text)
+                    sent_message = await message.reply_text(chunk_text)
+                if first_message is None:
+                    first_message = sent_message
         except (RuntimeError, ValueError, TypeError):
-            await message.reply_text(text)
+            return await message.reply_text(text)
+        return first_message
 
     @staticmethod
     def _render_markdown_chunks(text: str) -> list[tuple[str, list[MessageEntity] | None]]:
@@ -1616,20 +1637,52 @@ class TelegramBridge:
     def _activity_workspace(self, *, chat_id: int) -> Path:
         return self._agent_service.get_workspace(chat_id=chat_id) or self._config.default_workspace
 
+    async def _bind_pending_scheduled_tasks(self, *, chat_id: int, anchor_message_id: int) -> None:
+        if self._scheduled_task_store is None:
+            return
+        session_context = self._active_session_context(chat_id=chat_id)
+        session_id = None if session_context is None else session_context[0]
+        try:
+            await asyncio.to_thread(
+                self._scheduled_task_store.bind_unanchored_tasks,
+                chat_id=chat_id,
+                session_id=session_id,
+                anchor_message_id=anchor_message_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to bind pending scheduled tasks",
+                extra={"chat_id": chat_id, "anchor_message_id": anchor_message_id},
+            )
+
+    @staticmethod
+    def _scheduled_anchor_message_id(task: ScheduledTask) -> int:
+        anchor_message_id = task.anchor_message_id
+        if anchor_message_id is None:
+            raise ScheduledTaskExecutionError(SCHEDULED_MISSING_ANCHOR_ERROR)
+        return anchor_message_id
+
+    async def _send_scheduled_status_message(self, *, task: ScheduledTask, text: str) -> None:
+        app = self._app
+        if app is None:
+            raise ScheduledTaskExecutionError(APP_NOT_RUNNING_ERROR)
+        await self._send_markdown_to_chat(
+            bot=app.bot,
+            chat_id=task.chat_id,
+            text=text,
+            reply_to_message_id=self._scheduled_anchor_message_id(task),
+        )
+
     async def _execute_scheduled_notification(self, task: ScheduledTask) -> None:
         app = self._app
         if app is None:
             raise ScheduledTaskExecutionError(APP_NOT_RUNNING_ERROR)
-        await self._edit_scheduled_anchor(task=task, text="Running now...")
         final_text = (task.notify_text or "Completed.").strip()
-        edited = await self._edit_scheduled_anchor(task=task, text=final_text)
-        if edited:
-            return
         await self._send_markdown_to_chat(
             bot=app.bot,
             chat_id=task.chat_id,
             text=final_text,
-            reply_to_message_id=task.anchor_message_id,
+            reply_to_message_id=self._scheduled_anchor_message_id(task),
         )
 
     async def _execute_scheduled_prompt(self, task: ScheduledTask) -> None:
@@ -1638,18 +1691,18 @@ class TelegramBridge:
             raise ScheduledTaskExecutionError(APP_NOT_RUNNING_ERROR)
         if self._active_session_context(chat_id=task.chat_id) is None:
             message = "Could not run automatically: no active session."
-            await self._edit_scheduled_anchor(task=task, text=message)
+            await self._send_scheduled_status_message(task=task, text=message)
             raise ScheduledTaskExecutionError(message)
         prompt_text = (task.prompt_text or "").strip()
         if not prompt_text:
             message = "Could not run automatically: scheduled prompt is empty."
-            await self._edit_scheduled_anchor(task=task, text=message)
+            await self._send_scheduled_status_message(task=task, text=message)
             raise ScheduledTaskExecutionError(message)
         lock = self._chat_prompt_lock(task.chat_id)
         if lock.locked():
             raise ScheduledTaskDeferredError(SCHEDULED_CHAT_BUSY_ERROR)
 
-        await self._edit_scheduled_anchor(task=task, text="Running now...")
+        anchor_message_id = self._scheduled_anchor_message_id(task)
         async with lock:
             session_context = self._active_session_context(chat_id=task.chat_id)
             session_id = None if session_context is None else session_context[0]
@@ -1661,41 +1714,29 @@ class TelegramBridge:
                 reply = await self._agent_service.prompt(chat_id=task.chat_id, text=prompt_text)
             except AgentOutputLimitExceededError as exc:
                 message = "Could not run automatically: agent output exceeded ACP stdio limit."
-                await self._edit_scheduled_anchor(task=task, text=message)
+                await self._send_scheduled_status_message(task=task, text=message)
                 raise ScheduledTaskExecutionError(message) from exc
             except Exception as exc:
                 message = f"Could not run automatically: {exc}"
-                await self._edit_scheduled_anchor(task=task, text=message)
+                await self._send_scheduled_status_message(task=task, text=message)
                 raise ScheduledTaskExecutionError(message) from exc
             finally:
                 self._suppressed_activity_chats.discard(task.chat_id)
 
             if reply is None:
                 message = "Could not run automatically: no active session."
-                await self._edit_scheduled_anchor(task=task, text=message)
+                await self._send_scheduled_status_message(task=task, text=message)
                 raise ScheduledTaskExecutionError(message)
             try:
                 await self._send_agent_reply_to_chat(
                     chat_id=task.chat_id,
-                    reply_to_message_id=task.anchor_message_id,
+                    reply_to_message_id=anchor_message_id,
                     reply=reply,
                 )
             except Exception as exc:
                 message = f"Could not deliver scheduled reply: {exc}"
-                await self._edit_scheduled_anchor(task=task, text=message)
+                await self._send_scheduled_status_message(task=task, text=message)
                 raise ScheduledTaskExecutionError(message) from exc
-        await self._edit_scheduled_anchor(task=task, text="Completed.")
-
-    async def _edit_scheduled_anchor(self, *, task: ScheduledTask, text: str) -> bool:
-        app = self._app
-        if app is None:
-            raise ScheduledTaskExecutionError(APP_NOT_RUNNING_ERROR)
-        return await self._edit_markdown_in_chat(
-            bot=app.bot,
-            chat_id=task.chat_id,
-            message_id=task.anchor_message_id,
-            text=text,
-        )
 
     async def _send_agent_reply_to_chat(
         self,
