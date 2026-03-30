@@ -90,6 +90,24 @@ class FakeScheduler:
         self.stopped = True
 
 
+async def wait_for_task_status(
+    store: ScheduledTaskStore,
+    task_id: str,
+    *,
+    expected_status: str,
+    timeout_seconds: float = 0.5,
+) -> ScheduledTask:
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while True:
+        stored = store.get_task(task_id)
+        if stored is not None and stored.status == expected_status:
+            return stored
+        if asyncio.get_running_loop().time() >= deadline:
+            assert stored is not None
+            pytest.fail(f"timed out waiting for task {task_id} to reach status {expected_status!r}")
+        await asyncio.sleep(0.01)
+
+
 def make_task(  # noqa: PLR0913
     *,
     task_id: str = "task-1",
@@ -151,6 +169,15 @@ async def test_store_claims_due_tasks_in_order(tmp_path: Path):
     assert [task.id for task in claimed] == [first.id, second.id]
     assert all(task.status == "running" for task in claimed)
     assert all(task.attempt_count == 1 for task in claimed)
+
+
+async def test_store_claim_due_tasks_returns_empty_when_nothing_is_due(tmp_path: Path):
+    store = ScheduledTaskStore(tmp_path / "scheduled.sqlite3")
+    store.initialize()
+
+    claimed = store.claim_due_tasks(now=datetime.now(UTC))
+
+    assert claimed == []
 
 
 async def test_store_recovers_running_tasks_after_restart(tmp_path: Path):
@@ -271,12 +298,10 @@ async def test_scheduler_marks_task_done_on_success(tmp_path: Path):
     )
 
     await scheduler.start()
-    await asyncio.sleep(0.05)
+    stored = await wait_for_task_status(store, task.id, expected_status="done")
     await scheduler.stop()
 
-    stored = store.get_task(task.id)
     assert executed == [task.id]
-    assert stored is not None
     assert stored.status == "done"
 
 
@@ -301,11 +326,9 @@ async def test_scheduler_marks_task_failed_on_execution_error(tmp_path: Path):
     )
 
     await scheduler.start()
-    await asyncio.sleep(0.05)
+    stored = await wait_for_task_status(store, task.id, expected_status="failed")
     await scheduler.stop()
 
-    stored = store.get_task(task.id)
-    assert stored is not None
     assert stored.status == "failed"
     assert stored.last_error == "boom"
 
@@ -331,8 +354,33 @@ async def test_scheduler_releases_task_when_execution_is_deferred(tmp_path: Path
     )
 
     await scheduler.start()
-    await asyncio.sleep(0.05)
+    stored = await wait_for_task_status(store, task.id, expected_status="pending")
     await scheduler.stop()
+
+    assert stored.status == "pending"
+
+
+async def test_run_claimed_task_releases_deferred_task(tmp_path: Path):
+    store = ScheduledTaskStore(tmp_path / "scheduled.sqlite3")
+    store.initialize()
+    task = store.create_task(
+        chat_id=TEST_CHAT_ID,
+        anchor_message_id=11,
+        mode="notify",
+        notify_text="first",
+        run_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    claimed = store.claim_due_tasks(now=datetime.now(UTC))
+
+    async def executor(_: ScheduledTask) -> None:
+        raise ScheduledTaskDeferredError("busy")
+
+    scheduler = ScheduledTaskScheduler(
+        store=store,
+        runner=ScheduledTaskRunner(executor),
+    )
+
+    await scheduler._run_claimed_task(claimed[0])
 
     stored = store.get_task(task.id)
     assert stored is not None
@@ -360,11 +408,9 @@ async def test_scheduler_marks_task_failed_on_unexpected_error(tmp_path: Path):
     )
 
     await scheduler.start()
-    await asyncio.sleep(0.05)
+    stored = await wait_for_task_status(store, task.id, expected_status="failed")
     await scheduler.stop()
 
-    stored = store.get_task(task.id)
-    assert stored is not None
     assert stored.status == "failed"
     assert stored.last_error == UNEXPECTED_EXECUTION_ERROR
 
