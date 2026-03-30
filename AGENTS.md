@@ -48,6 +48,7 @@ Description: A Telegram bot that implements Agent Client Protocol to interact wi
   For common AI collaborators, use:
   - "Co-authored-by: Codex <codex@openai.com>".
   - "Co-authored-by: Claude <noreply@anthropic.com>".
+- For releases, prefer the repository `Makefile` targets instead of ad-hoc commands. In this project, use `make bump`, `make release-check`, and `make release`.
 
 ## Documentation
 
