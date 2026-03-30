@@ -22,8 +22,6 @@ from telegram_acp_bot.register_commands import (
 )
 from telegram_acp_bot.telegram.bot import BOT_COMMANDS
 
-pytestmark = pytest.mark.asyncio
-
 
 @pytest.fixture(autouse=True)
 def isolate_env(monkeypatch: pytest.MonkeyPatch, mocker):
@@ -191,6 +189,7 @@ def test_main_dispatches_to_register_commands(mocker, capsys: pytest.CaptureFixt
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
 async def test_call_api_set_default_scope(mocker):
     """_call_api calls set_my_commands with default scope."""
     mock_bot = mocker.AsyncMock()
@@ -206,6 +205,7 @@ async def test_call_api_set_default_scope(mocker):
     assert call_kwargs.kwargs["language_code"] is None
 
 
+@pytest.mark.asyncio
 async def test_call_api_set_all_private_chats(mocker):
     """_call_api calls set_my_commands with all_private_chats scope."""
     mock_bot = mocker.AsyncMock()
@@ -221,6 +221,7 @@ async def test_call_api_set_all_private_chats(mocker):
     assert call_kwargs.kwargs["language_code"] == "en"
 
 
+@pytest.mark.asyncio
 async def test_call_api_set_all_group_chats(mocker):
     """_call_api uses all_group_chats scope."""
     mock_bot = mocker.AsyncMock()
@@ -234,6 +235,7 @@ async def test_call_api_set_all_group_chats(mocker):
     assert isinstance(call_kwargs.kwargs["scope"], BotCommandScopeAllGroupChats)
 
 
+@pytest.mark.asyncio
 async def test_call_api_set_all_chat_administrators(mocker):
     """_call_api uses all_chat_administrators scope."""
     mock_bot = mocker.AsyncMock()
@@ -247,6 +249,7 @@ async def test_call_api_set_all_chat_administrators(mocker):
     assert isinstance(call_kwargs.kwargs["scope"], BotCommandScopeAllChatAdministrators)
 
 
+@pytest.mark.asyncio
 async def test_call_api_delete(mocker):
     """_call_api calls delete_my_commands when delete=True."""
     mock_bot = mocker.AsyncMock()
