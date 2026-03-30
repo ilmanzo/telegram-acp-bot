@@ -49,9 +49,9 @@ class _ActivityModeHandler:
     async def on_activity_event(self, *, chat_id: int, block: AgentActivityBlock) -> None:
         raise NotImplementedError
 
-    async def finalize_reply(self, *, chat_id: int, update: Update, text: str) -> bool:
+    async def finalize_reply(self, *, chat_id: int, update: Update, text: str) -> int | None:
         del chat_id, update, text
-        return False
+        return None
 
     async def handle_empty_reply(self, *, chat_id: int) -> None:
         del chat_id
@@ -147,11 +147,10 @@ class _CompactActivityModeHandler(_ActivityModeHandler):
             if existing_msg_id is not None:
                 self._bridge._ensure_compact_animation(chat_id=chat_id, message_id=existing_msg_id)
 
-    async def finalize_reply(self, *, chat_id: int, update: Update, text: str) -> bool:
+    async def finalize_reply(self, *, chat_id: int, update: Update, text: str) -> int | None:
         if self._bridge._app is None or chat_id not in self._bridge._compact_status_msg_id:
-            return False
-        await self._bridge._finalize_compact_reply(chat_id=chat_id, update=update, text=text)
-        return True
+            return None
+        return await self._bridge._finalize_compact_reply(chat_id=chat_id, update=update, text=text)
 
     async def handle_empty_reply(self, *, chat_id: int) -> None:
         await self._bridge._clear_compact_status(chat_id)
@@ -196,23 +195,23 @@ class _VerboseActivityModeHandler(_ActivityModeHandler):
             self._clear_pending(chat_id=chat_id, slot_key=slot_key)
             await self._apply_block_locked(chat_id=chat_id, slot_key=slot_key, block=block)
 
-    async def finalize_reply(self, *, chat_id: int, update: Update, text: str) -> bool:
+    async def finalize_reply(self, *, chat_id: int, update: Update, text: str) -> int | None:
         del update
         app = self._bridge._app
         if app is None:
-            return False
+            return None
         lock = self._locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
             self._clear_pending(chat_id=chat_id, slot_key="activity:reply")
             active = self._messages_by_chat.get(chat_id, {}).get("activity:reply")
             if active is None:
-                return False
+                return None
             self._clear_message(chat_id=chat_id, slot_key="activity:reply")
             if not text:
-                return True
+                return active.message_id
             chunks = self._bridge._render_markdown_chunks(text)
             if not chunks:
-                return True
+                return active.message_id
             first_text, first_entities = chunks[0]
             edited = await self._bridge._edit_rendered_chunk_in_chat(
                 bot=app.bot,
@@ -223,10 +222,10 @@ class _VerboseActivityModeHandler(_ActivityModeHandler):
             )
             if edited:
                 await self._bridge._send_rendered_chunks_to_chat(bot=app.bot, chat_id=chat_id, chunks=chunks[1:])
-                return True
+                return active.message_id
             with suppress(TelegramError):
                 await app.bot.delete_message(chat_id=chat_id, message_id=active.message_id)
-            return False
+            return None
 
     async def clear_chat_state(self, *, chat_id: int) -> None:
         self._cancel_flush_task(chat_id)
