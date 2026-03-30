@@ -16,6 +16,19 @@ Project documentation: <https://mgaitan.github.io/telegram-acp-bot/>
 
 This project is in **alpha** and under active development. Development has included extensive use of AI agents. Human and agents contributions are welcome.
 
+## Features
+
+Some of the most useful capabilities are documented here:
+
+- Reply with attachments:
+  https://mgaitan.github.io/telegram-acp-bot/mcp.html#mcp-feature-attachments
+- Scheduled tasks:
+  https://mgaitan.github.io/telegram-acp-bot/deferred_followups.html#deferred-followups-ux
+- Queue messages when the agent is busy:
+  https://mgaitan.github.io/telegram-acp-bot/how-to.html#how-to-busy-queue
+- Internal MCP tools overview:
+  https://mgaitan.github.io/telegram-acp-bot/mcp.html
+
 ## Quick Start
 
 Run directly without installing via `uvx`:

@@ -27,6 +27,7 @@ The current implementation supports one-shot tasks only. Tasks are persisted in 
 
 Recurring schedules, list/cancel commands, and automatic session rehydration are intentionally out of scope for this first version.
 
+(deferred-followups-ux)=
 ## How The UX Works
 
 When the agent calls `schedule_task`, the MCP tool persists the task and returns a summary. The tool itself does not send a Telegram message. Instead, the agent uses that tool result to answer the user in normal language. Once that answer reaches Telegram, the bot records that reply as the task’s anchor message.

@@ -1,6 +1,18 @@
 # MCP Integration
 
-This project includes a built-in MCP server that the bot advertises automatically to the ACP agent. If you run:
+This project includes a built-in MCP server that the bot advertises automatically to the ACP agent. The practical reason for having it is simple: some things belong to the Telegram channel itself, not to the ACP conversation protocol.
+
+That becomes visible in requests such as these:
+
+```text
+Send me the generated screenshot.
+Check for review in 2 minutes.
+Remind me at 9 PM to restart the bot.
+```
+
+In all of those cases, the agent needs a channel-side capability. It may need to send a Telegram attachment, or schedule something that should happen later in the same chat. Those are exactly the kinds of actions exposed through the internal MCP tools.
+
+If you run:
 
 ```bash
 uv run telegram-acp-bot
@@ -8,17 +20,45 @@ uv run telegram-acp-bot
 
 every new or resumed ACP session receives an MCP stdio server named `telegram-channel`. In practice, this is how the agent performs Telegram-specific side effects without extending ACP itself.
 
-ACP remains responsible for the conversational session with the agent. MCP is the place for actions that belong to the Telegram channel: sending an attachment to the current chat, or scheduling a follow-up that should happen later. That split is the main design idea. It keeps the ACP side protocol-native while still giving the agent a clean way to interact with Telegram.
+ACP remains responsible for the conversational session with the agent. MCP is the place for actions that belong to the Telegram channel. That split is the main design idea. It keeps the ACP side protocol-native while still giving the agent a clean way to interact with Telegram.
 
-The implementation now lives under `telegram_acp_bot.mcp`, and the built-in server entrypoint is:
+## What The Tools Enable
+
+The built-in server currently exposes three tools.
+
+`telegram_channel_info` is a lightweight capability probe. It lets the agent confirm what this Telegram channel integration can currently do.
+
+`telegram_send_attachment` lets the agent deliver a file or image to the current Telegram chat. This is the tool behind flows like “send me the generated screenshot” or “upload the review artifact”.
+
+`schedule_task` lets the agent schedule a one-shot deferred follow-up. This is the tool behind flows like “check for review in 2 minutes” or “remind me tomorrow at 9 PM”.
+
+Here is a concrete example of the second case. A user may say:
+
+```text
+Check for review in 2 minutes.
+```
+
+The agent can translate that into a relative scheduling call such as:
+
+```text
+schedule_task(
+  mode="prompt_agent",
+  delay_minutes=2,
+  prompt_text="Check the review status again and report any changes."
+)
+```
+
+The point of the relative delay inputs is that the agent does not need to compute an absolute timestamp for short delays. For this kind of prompt, `delay_minutes=2` is the natural representation.
+
+## How It Is Implemented
+
+The implementation lives under `telegram_acp_bot.mcp`, and the built-in server entrypoint is:
 
 ```bash
 python -m telegram_acp_bot.mcp.server
 ```
 
-## How The Pieces Fit Together
-
-The easiest way to think about the MCP layer is as a small local service that knows how to translate an ACP-side tool call into a Telegram-side action.
+The easiest way to think about the MCP layer is as a small local service that translates an ACP-side tool call into a Telegram-side action.
 
 ```{mermaid}
 :align: center
@@ -34,13 +74,10 @@ The bot process owns all of this. The MCP server is not a separate deployment. I
 
 For configuration details, see {doc}`configuration` and {ref}`mcp-channel-environment-variables`. In normal use, the important environment variables are injected by the bot runtime itself: {term}`ACP_TELEGRAM_CHANNEL_STATE_FILE`, {term}`ACP_TELEGRAM_BOT_TOKEN`, and, when scheduling is enabled, {term}`ACP_SCHEDULED_TASKS_DB`.
 
-## Available Tools
+(mcp-feature-attachments)=
+## Reply With Attachments
 
-The built-in server currently exposes three tools.
-
-`telegram_channel_info` returns capability metadata. It is mostly useful as a lightweight “what can this channel do?” probe.
-
-`telegram_send_attachment` delivers a file or image to the current Telegram chat. The agent can provide either a base64 payload or, when explicitly enabled, a trusted local path. A typical call looks like this:
+`telegram_send_attachment` accepts either a base64 payload or, when explicitly enabled, a trusted local path. This is the feature behind flows where the agent answers not only with text, but also with a file or image sent back to Telegram. A typical call looks like this:
 
 ```text
 telegram_send_attachment(
@@ -51,6 +88,9 @@ telegram_send_attachment(
 ```
 
 If the MIME type resolves to `image/*`, the server sends a Telegram photo. Otherwise it sends a document. In most deployments, `data_base64` is the safer default. The `path` input is intentionally disabled unless {term}`ACP_TELEGRAM_CHANNEL_ALLOW_PATH` is enabled.
+
+(mcp-feature-scheduling)=
+## Schedule Tasks
 
 `schedule_task` stores a one-shot deferred follow-up for the current chat. It supports two styles of time input. For absolute times, the agent can pass `run_at` as an ISO timestamp with an explicit timezone offset. For relative requests such as “in 10 minutes” or “in 30 seconds”, the preferred form is a delay input like `delay_minutes=10` or `delay_seconds=30`. That keeps the tool call simple and avoids making the agent compute a wall-clock timestamp for short delays.
 

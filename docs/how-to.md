@@ -110,6 +110,7 @@ The available modes are:
 - `compact`: one in-progress status message that becomes the final answer.
 - `verbose`: in-place append-only streaming for reply text and active tool output.
 
+(how-to-busy-queue)=
 ## 7. Busy-state handling
 
 When you send a message while the agent is already processing a previous prompt, the bot:
