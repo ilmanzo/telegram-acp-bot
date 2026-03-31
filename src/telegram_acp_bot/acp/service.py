@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import asyncio.subprocess as aio_subprocess
 import base64
+import contextlib
 import logging
 import mimetypes
 import os
@@ -414,9 +415,11 @@ class AcpAgentService:
             try:
                 killpg(os.getpgid(pid), signal.SIGTERM)
             except OSError:
-                process.terminate()
+                with contextlib.suppress(OSError):
+                    process.terminate()
         else:
-            process.terminate()
+            with contextlib.suppress(OSError):
+                process.terminate()
         try:
             await asyncio.wait_for(process.wait(), timeout=3)
         except TimeoutError:
@@ -424,9 +427,11 @@ class AcpAgentService:
                 try:
                     killpg(os.getpgid(pid), signal.SIGKILL)
                 except OSError:
-                    process.kill()
+                    with contextlib.suppress(OSError):
+                        process.kill()
             else:
-                process.kill()
+                with contextlib.suppress(OSError):
+                    process.kill()
             await process.wait()
 
     async def _start_initialized_connection(
