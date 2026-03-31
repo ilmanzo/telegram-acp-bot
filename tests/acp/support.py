@@ -74,12 +74,13 @@ def make_client() -> _AcpClient:
 
 
 class FakeProcess:
-    def __init__(self, *, with_pipes: bool = True) -> None:
+    def __init__(self, *, with_pipes: bool = True, pid: int | None = None) -> None:
         self.stdin = object() if with_pipes else None
         self.stdout = object() if with_pipes else None
         self.returncode: int | None = None
         self.terminated = False
         self.killed = False
+        self.pid = pid
 
     def terminate(self) -> None:
         self.terminated = True

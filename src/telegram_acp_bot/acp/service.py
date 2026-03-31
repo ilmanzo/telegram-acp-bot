@@ -7,6 +7,8 @@ import asyncio.subprocess as aio_subprocess
 import base64
 import logging
 import mimetypes
+import os
+import signal
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import cast
@@ -406,11 +408,25 @@ class AcpAgentService:
         if process.returncode is not None:
             return
 
-        process.terminate()
+        pid: int | None = getattr(process, "pid", None)
+        killpg = getattr(os, "killpg", None)
+        if killpg is not None and pid is not None:
+            try:
+                killpg(os.getpgid(pid), signal.SIGTERM)
+            except OSError:
+                process.terminate()
+        else:
+            process.terminate()
         try:
             await asyncio.wait_for(process.wait(), timeout=3)
         except TimeoutError:
-            process.kill()
+            if killpg is not None and pid is not None:
+                try:
+                    killpg(os.getpgid(pid), signal.SIGKILL)
+                except OSError:
+                    process.kill()
+            else:
+                process.kill()
             await process.wait()
 
     async def _start_initialized_connection(
@@ -424,6 +440,7 @@ class AcpAgentService:
             stdin=aio_subprocess.PIPE,
             stdout=aio_subprocess.PIPE,
             limit=self._stdio_limit,
+            start_new_session=True,
         )
         with bind_log_context(chat_id=chat_id):
             logger.debug("Spawned ACP process for chat_id=%s pid=%s", chat_id, getattr(process, "pid", "unknown"))
