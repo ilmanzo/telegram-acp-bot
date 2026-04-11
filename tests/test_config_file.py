@@ -151,3 +151,63 @@ def test_load_config_os_error(tmp_path: Path, mocker) -> None:
     mocker.patch("pathlib.Path.read_text", side_effect=OSError("permission denied"))
     with pytest.raises(ConfigFileError, match="Cannot read config file"):
         load_config_file(path)
+
+
+# mcp_servers validation tests
+
+
+def test_mcp_servers_valid_stdio(tmp_path: Path) -> None:
+    data = {"mcp_servers": {"echo": {"command": "uv", "args": ["run", "echo.py"], "env": {"KEY": "val"}}}}
+    result = load_config_file(write_config(tmp_path, data))
+    assert result["mcp_servers"]["echo"]["command"] == "uv"
+
+
+def test_mcp_servers_valid_remote(tmp_path: Path) -> None:
+    data = {"mcp_servers": {"remote": {"url": "https://mcp.example.com/mcp", "headers": {"Auth": "Bearer tok"}}}}
+    result = load_config_file(write_config(tmp_path, data))
+    assert result["mcp_servers"]["remote"]["url"] == "https://mcp.example.com/mcp"
+
+
+def test_mcp_servers_not_object(tmp_path: Path) -> None:
+    with pytest.raises(ConfigFileError, match=r"'mcp_servers' must be a JSON object"):
+        load_config_file(write_config(tmp_path, {"mcp_servers": [{"command": "x"}]}))
+
+
+def test_mcp_servers_entry_not_object(tmp_path: Path) -> None:
+    with pytest.raises(ConfigFileError, match="must be a JSON object"):
+        load_config_file(write_config(tmp_path, {"mcp_servers": {"bad": "string"}}))
+
+
+def test_mcp_servers_missing_transport(tmp_path: Path) -> None:
+    with pytest.raises(ConfigFileError, match="must define 'command'"):
+        load_config_file(write_config(tmp_path, {"mcp_servers": {"srv": {"args": []}}}))
+
+
+def test_mcp_servers_both_transports(tmp_path: Path) -> None:
+    with pytest.raises(ConfigFileError, match="cannot define both"):
+        load_config_file(write_config(tmp_path, {"mcp_servers": {"srv": {"command": "x", "url": "http://x"}}}))
+
+
+def test_mcp_servers_stdio_command_not_string(tmp_path: Path) -> None:
+    with pytest.raises(ConfigFileError, match="'command' must be a string"):
+        load_config_file(write_config(tmp_path, {"mcp_servers": {"srv": {"command": 42}}}))
+
+
+def test_mcp_servers_stdio_args_not_list_of_strings(tmp_path: Path) -> None:
+    with pytest.raises(ConfigFileError, match="'args' must be a list of strings"):
+        load_config_file(write_config(tmp_path, {"mcp_servers": {"srv": {"command": "x", "args": [1, 2]}}}))
+
+
+def test_mcp_servers_stdio_env_not_string_dict(tmp_path: Path) -> None:
+    with pytest.raises(ConfigFileError, match=r"'env' must be an object"):
+        load_config_file(write_config(tmp_path, {"mcp_servers": {"srv": {"command": "x", "env": {"k": 1}}}}))
+
+
+def test_mcp_servers_remote_url_not_string(tmp_path: Path) -> None:
+    with pytest.raises(ConfigFileError, match="'url' must be a string"):
+        load_config_file(write_config(tmp_path, {"mcp_servers": {"srv": {"url": 123}}}))
+
+
+def test_mcp_servers_remote_headers_not_string_dict(tmp_path: Path) -> None:
+    with pytest.raises(ConfigFileError, match=r"'headers' must be an object"):
+        load_config_file(write_config(tmp_path, {"mcp_servers": {"srv": {"url": "http://x", "headers": {"h": 1}}}}))

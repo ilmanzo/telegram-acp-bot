@@ -15,7 +15,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any, cast
 
-from acp.schema import EnvVariable, McpServerStdio
+from acp.schema import EnvVariable, HttpHeader, HttpMcpServer, McpServerStdio
 from dotenv import load_dotenv
 
 from telegram_acp_bot.acp.models import ActivityMode, PermissionEventOutput, PermissionMode
@@ -147,21 +147,42 @@ def _default_mcp_servers(
     telegram_token: str,
     state_file: Path,
     scheduled_tasks_db: Path,
-) -> tuple[McpServerStdio, ...]:
-    """Return MCP servers that should always be exposed to the ACP agent."""
+    extra_servers: dict[str, Any] | None = None,
+) -> tuple[McpServerStdio | HttpMcpServer, ...]:
+    """Return MCP servers to expose to the ACP agent.
 
-    return (
-        McpServerStdio(
-            name="telegram-channel",
-            command=sys.executable,
-            args=["-m", "telegram_acp_bot.mcp.server"],
-            env=[
-                EnvVariable(name=TOKEN_ENV, value=telegram_token),
-                EnvVariable(name=STATE_FILE_ENV, value=str(state_file)),
-                EnvVariable(name=ACP_SCHEDULED_TASKS_DB_ENV, value=str(scheduled_tasks_db)),
-            ],
-        ),
+    Always includes the internal ``telegram-channel`` server.
+    External servers from the config file are appended after it.
+    If an external server name conflicts with the internal one, the external
+    server overrides it.
+    """
+    internal = McpServerStdio(
+        name="telegram-channel",
+        command=sys.executable,
+        args=["-m", "telegram_acp_bot.mcp.server"],
+        env=[
+            EnvVariable(name=TOKEN_ENV, value=telegram_token),
+            EnvVariable(name=STATE_FILE_ENV, value=str(state_file)),
+            EnvVariable(name=ACP_SCHEDULED_TASKS_DB_ENV, value=str(scheduled_tasks_db)),
+        ],
     )
+    servers: dict[str, McpServerStdio | HttpMcpServer] = {"telegram-channel": internal}
+    for name, defn in (extra_servers or {}).items():
+        if "command" in defn:
+            servers[name] = McpServerStdio(
+                name=name,
+                command=defn["command"],
+                args=defn.get("args", []),
+                env=[EnvVariable(name=k, value=v) for k, v in defn.get("env", {}).items()],
+            )
+        else:
+            servers[name] = HttpMcpServer(
+                name=name,
+                url=defn["url"],
+                headers=[HttpHeader(name=k, value=v) for k, v in defn.get("headers", {}).items()],
+                type="http",
+            )
+    return tuple(servers.values())
 
 
 def _apply_config_file_defaults(
@@ -328,6 +349,7 @@ def main(args: list[str] | None = None) -> int:
         telegram_token=opts.telegram_token,
         state_file=channel_state_file,
         scheduled_tasks_db=scheduled_tasks_db,
+        extra_servers=config_data.get("mcp_servers"),
     )
 
     config = make_config(

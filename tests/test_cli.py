@@ -448,6 +448,69 @@ def test_main_config_file_workspace(mocker, monkeypatch, tmp_path):
     assert config.default_workspace == tmp_path
 
 
+def test_main_config_file_external_stdio_mcp_server(mocker, monkeypatch, tmp_path):
+    """Extra stdio MCP servers from config file are passed to the service."""
+    monkeypatch.delenv("ACP_AGENT_COMMAND", raising=False)
+    mock_service = mocker.patch("telegram_acp_bot.AcpAgentService")
+    mocker.patch("telegram_acp_bot.run_polling", return_value=0)
+    config_path = _write_config(
+        tmp_path,
+        {
+            "telegram": {"bot_token": "T"},
+            "acp": {"agent_command": "a"},
+            "mcp_servers": {"echo": {"command": "uv", "args": ["run", "echo.py"], "env": {"K": "v"}}},
+        },
+    )
+    assert main(["--config", str(config_path)]) == 0
+    mcp_servers = mock_service.call_args.kwargs["mcp_servers"]
+    names = [s.name for s in mcp_servers]
+    assert "telegram-channel" in names
+    assert "echo" in names
+    echo = next(s for s in mcp_servers if s.name == "echo")
+    assert echo.command == "uv"
+    assert echo.args == ["run", "echo.py"]
+    assert any(e.name == "K" and e.value == "v" for e in echo.env)
+
+
+def test_main_config_file_external_http_mcp_server(mocker, monkeypatch, tmp_path):
+    """Extra remote HTTP MCP servers from config file are passed to the service."""
+    monkeypatch.delenv("ACP_AGENT_COMMAND", raising=False)
+    mock_service = mocker.patch("telegram_acp_bot.AcpAgentService")
+    mocker.patch("telegram_acp_bot.run_polling", return_value=0)
+    config_path = _write_config(
+        tmp_path,
+        {
+            "telegram": {"bot_token": "T"},
+            "acp": {"agent_command": "a"},
+            "mcp_servers": {"remote": {"url": "https://mcp.example.com/mcp", "headers": {"Auth": "Bearer tok"}}},
+        },
+    )
+    assert main(["--config", str(config_path)]) == 0
+    mcp_servers = mock_service.call_args.kwargs["mcp_servers"]
+    remote = next(s for s in mcp_servers if s.name == "remote")
+    assert remote.url == "https://mcp.example.com/mcp"
+    assert any(h.name == "Auth" and h.value == "Bearer tok" for h in remote.headers)
+
+
+def test_main_config_file_external_server_overrides_internal(mocker, monkeypatch, tmp_path):
+    """A config server named 'telegram-channel' replaces the internal one."""
+    monkeypatch.delenv("ACP_AGENT_COMMAND", raising=False)
+    mock_service = mocker.patch("telegram_acp_bot.AcpAgentService")
+    mocker.patch("telegram_acp_bot.run_polling", return_value=0)
+    config_path = _write_config(
+        tmp_path,
+        {
+            "telegram": {"bot_token": "T"},
+            "acp": {"agent_command": "a"},
+            "mcp_servers": {"telegram-channel": {"command": "custom-server"}},
+        },
+    )
+    assert main(["--config", str(config_path)]) == 0
+    mcp_servers = mock_service.call_args.kwargs["mcp_servers"]
+    channel = next(s for s in mcp_servers if s.name == "telegram-channel")
+    assert channel.command == "custom-server"
+
+
 def test_main_config_file_stdio_limit_and_timeout(mocker, monkeypatch, tmp_path):
     """stdio_limit and connect_timeout from config file are forwarded to the service."""
     monkeypatch.delenv("ACP_AGENT_COMMAND", raising=False)
