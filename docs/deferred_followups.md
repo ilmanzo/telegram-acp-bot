@@ -90,11 +90,20 @@ Example interaction:
 
 ```text
 User: /schedule 30m Check for new review comments on the open PR
+Summarize what changed
+Flag anything blocking merge
 Bot: Scheduled for 2026-04-11 10:30 UTC. Use /scheduled to view or cancel.
 
 ... 30 minutes later ...
 
 Bot (replying to that command): There are 3 new comments on the PR.
+```
+
+Single-line prompts remain valid as a shorter form:
+
+```text
+User: /schedule 2h Generate the weekly summary report
+Bot: Scheduled for 2026-04-11 12:00 UTC. Use /scheduled to view or cancel.
 ```
 
 The `/schedule` command sets the command message itself as the anchor, so the scheduled reply will appear directly in that thread. Session behavior and failure reporting follow the same rules as agent-driven scheduling.

@@ -146,13 +146,23 @@ Example:
 
 ```text
 /schedule 30m Check for new review comments on the open PR
-/schedule 2h Generate the weekly summary report
-/schedule 2026-04-12T09:00:00+00:00 Send the daily standup report
+Summarize what changed
+Flag anything blocking merge
+
+/schedule 2026-04-12T09:00:00+00:00 Generate the weekly summary report
+Include pending reviews
+Mention overdue follow-ups
 ```
 
 The bot replies with the scheduled execution time. When the time arrives, the stored prompt is sent to the agent and the reply is posted back to the chat as a reply to your `/schedule` message.
 
 The prompt may also continue on following lines. Everything after the time spec is stored verbatim, so multiline prompts keep their line breaks.
+
+Single-line prompts still work too:
+
+```text
+/schedule 2h Generate the weekly summary report
+```
 
 If no active session exists when the scheduled time arrives, the bot will report that the task could not be run automatically.
 
