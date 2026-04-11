@@ -347,9 +347,14 @@ def main(args: list[str] | None = None) -> int:
     pre_opts, _ = parser.parse_known_args(args=argv)
 
     config_data: dict[str, Any] = {}
-    config_path = Path(pre_opts.config).expanduser() if pre_opts.config else _find_config_file()
+    if pre_opts.config is not None:
+        if not pre_opts.config.strip():
+            parser.error("--config must not be empty or whitespace")
+        config_path = Path(pre_opts.config).expanduser()
+    else:
+        config_path = _find_config_file()
 
-    if config_path:
+    if config_path is not None:
         try:
             config_data = load_config_file(config_path)
         except ConfigFileError as exc:
