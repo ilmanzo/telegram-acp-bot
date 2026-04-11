@@ -105,6 +105,8 @@ SCHEDULED_CHAT_BUSY_ERROR = "chat is busy"
 SCHEDULED_PROMPT_TRY_LOCK_TIMEOUT_SECONDS = 1e-9
 SCHEDULED_MISSING_ANCHOR_ERROR = "scheduled task is missing an anchor message"
 SCHEDULED_TASK_PREVIEW_MAX_CHARS = 72
+SCHEDULE_COMMAND_PART_COUNT = 3
+SCHEDULE_COMMAND_MIN_ARGS = 2
 _SCHEDULE_DELAY_RE = re.compile(r"^(\d+)(s|m|h|d)$", re.IGNORECASE)
 
 
@@ -317,17 +319,11 @@ class TelegramBridge:
             return
 
         chat_id = self._chat_id(update)
-        args = self._context_args(context)
-
-        if not args:
+        parsed_command = self._parse_schedule_command(update=update, context=context)
+        if parsed_command is None:
             await self._reply(update, SCHEDULE_COMMAND_USAGE)
             return
-
-        time_spec, *rest = args
-        prompt_text = " ".join(rest).strip()
-        if not prompt_text:
-            await self._reply(update, SCHEDULE_COMMAND_USAGE)
-            return
+        time_spec, prompt_text = parsed_command
 
         run_at = TelegramBridge._parse_schedule_time(time_spec)
         if run_at is None:
@@ -357,6 +353,32 @@ class TelegramBridge:
 
         timestamp = task.run_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
         await self._reply(update, f"Scheduled for {timestamp}. Use /scheduled to view or cancel.")
+
+    def _parse_schedule_command(
+        self,
+        *,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> tuple[str, str] | None:
+        """Extract the time spec and prompt text from `/schedule` input."""
+
+        message = update.message
+        raw_text = "" if message is None else (message.text or "").strip()
+        if raw_text:
+            parts = raw_text.split(maxsplit=SCHEDULE_COMMAND_PART_COUNT - 1)
+            if len(parts) < SCHEDULE_COMMAND_PART_COUNT:
+                return None
+            _, time_spec, prompt_text = parts
+            return time_spec, prompt_text.strip()
+
+        args = self._context_args(context)
+        if len(args) < SCHEDULE_COMMAND_MIN_ARGS:
+            return None
+        time_spec, *rest = args
+        prompt_text = " ".join(rest).strip()
+        if not prompt_text:
+            return None
+        return time_spec, prompt_text
 
     @staticmethod
     def _parse_schedule_time(spec: str) -> datetime | None:

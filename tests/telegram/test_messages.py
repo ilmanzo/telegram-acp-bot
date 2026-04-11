@@ -2038,6 +2038,7 @@ async def test_run_polling_returns_restart_exit_code(monkeypatch):
 
 
 async def test_schedule_prompt_creates_pending_task(tmp_path: Path):
+    anchor_message_id = 77
     store = ScheduledTaskStore(tmp_path / "scheduled.sqlite3")
     store.initialize()
     bridge = TelegramBridge(
@@ -2045,7 +2046,7 @@ async def test_schedule_prompt_creates_pending_task(tmp_path: Path):
         agent_service=EchoAgentService(SessionRegistry()),
         scheduled_task_store=store,
     )
-    update = make_update(with_message=True, message_id=77)
+    update = make_update(with_message=True, message_id=anchor_message_id)
 
     await bridge.schedule_prompt(update, make_context(args=["30m", "Check", "for", "new", "PRs"]))
 
@@ -2059,10 +2060,29 @@ async def test_schedule_prompt_creates_pending_task(tmp_path: Path):
     task = tasks[0]
     assert task.mode == "prompt_agent"
     assert task.prompt_text == "Check for new PRs"
-    assert task.anchor_message_id == 77
+    assert task.anchor_message_id == anchor_message_id
     assert task.status == "pending"
     now = datetime.now(UTC)
     assert now + timedelta(minutes=29) <= task.run_at <= now + timedelta(minutes=31)
+
+
+async def test_schedule_prompt_preserves_multiline_prompt_text(tmp_path: Path):
+    anchor_message_id = 88
+    store = ScheduledTaskStore(tmp_path / "scheduled.sqlite3")
+    store.initialize()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=EchoAgentService(SessionRegistry()),
+        scheduled_task_store=store,
+    )
+    update = make_update(with_message=True, text="/schedule 30m First line\nSecond line", message_id=anchor_message_id)
+
+    await bridge.schedule_prompt(update, make_context(args=["30m", "First", "line", "Second", "line"]))
+
+    tasks = store.list_tasks_for_chat(chat_id=TEST_CHAT_ID)
+    assert len(tasks) == 1
+    assert tasks[0].prompt_text == "First line\nSecond line"
+    assert tasks[0].anchor_message_id == anchor_message_id
 
 
 async def test_schedule_prompt_accepts_all_delay_units(tmp_path: Path):
@@ -2073,13 +2093,14 @@ async def test_schedule_prompt_accepts_all_delay_units(tmp_path: Path):
         agent_service=EchoAgentService(SessionRegistry()),
         scheduled_task_store=store,
     )
-    for spec, minutes in [("60s", 1), ("2m", 2), ("1h", 60), ("1d", 24 * 60)]:
+    schedule_specs = [("60s", 1), ("2m", 2), ("1h", 60), ("1d", 24 * 60)]
+    for spec, _minutes in schedule_specs:
         update = make_update(with_message=True)
         await bridge.schedule_prompt(update, make_context(args=[spec, "Ping"]))
         assert update.message is not None
         assert update.message.replies[-1].startswith("Scheduled for ")
     tasks = store.list_tasks_for_chat(chat_id=TEST_CHAT_ID)
-    assert len(tasks) == 4
+    assert len(tasks) == len(schedule_specs)
 
 
 async def test_schedule_prompt_accepts_absolute_timestamp(tmp_path: Path):
@@ -2153,6 +2174,40 @@ async def test_schedule_prompt_shows_usage_when_only_time_given(tmp_path: Path):
     assert "/schedule" in update.message.replies[-1]
 
 
+async def test_schedule_prompt_shows_usage_when_fallback_args_have_blank_prompt(tmp_path: Path):
+    store = ScheduledTaskStore(tmp_path / "scheduled.sqlite3")
+    store.initialize()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=EchoAgentService(SessionRegistry()),
+        scheduled_task_store=store,
+    )
+    update = make_update(with_message=True)
+
+    await bridge.schedule_prompt(update, make_context(args=["10m", "   "]))
+
+    assert update.message is not None
+    assert "Usage:" in update.message.replies[-1]
+    assert "/schedule" in update.message.replies[-1]
+
+
+async def test_schedule_prompt_shows_usage_when_raw_message_has_no_prompt(tmp_path: Path):
+    store = ScheduledTaskStore(tmp_path / "scheduled.sqlite3")
+    store.initialize()
+    bridge = TelegramBridge(
+        config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
+        agent_service=EchoAgentService(SessionRegistry()),
+        scheduled_task_store=store,
+    )
+    update = make_update(with_message=True, text="/schedule 10m")
+
+    await bridge.schedule_prompt(update, make_context(args=["10m"]))
+
+    assert update.message is not None
+    assert "Usage:" in update.message.replies[-1]
+    assert "/schedule" in update.message.replies[-1]
+
+
 async def test_schedule_prompt_reports_unavailable_without_store():
     bridge = TelegramBridge(
         config=make_config(token="TOKEN", allowed_user_ids=[], workspace="."),
@@ -2184,6 +2239,7 @@ async def test_schedule_prompt_denies_access_for_restricted_users(tmp_path: Path
 
 
 async def test_schedule_prompt_sets_session_id_when_session_is_active(tmp_path: Path):
+    anchor_message_id = 55
     store = ScheduledTaskStore(tmp_path / "scheduled.sqlite3")
     store.initialize()
     service = PromptContextService()
@@ -2195,13 +2251,13 @@ async def test_schedule_prompt_sets_session_id_when_session_is_active(tmp_path: 
     new_update = make_update(with_message=True)
     await bridge.new_session(new_update, make_context())
 
-    schedule_update = make_update(with_message=True, message_id=55)
+    schedule_update = make_update(with_message=True, message_id=anchor_message_id)
     await bridge.schedule_prompt(schedule_update, make_context(args=["5m", "Do", "the", "thing"]))
 
     tasks = store.list_tasks_for_chat(chat_id=TEST_CHAT_ID)
     assert len(tasks) == 1
     assert tasks[0].session_id == "s-context"
-    assert tasks[0].anchor_message_id == 55
+    assert tasks[0].anchor_message_id == anchor_message_id
 
 
 async def test_schedule_prompt_reports_store_error(tmp_path: Path, mocker):
@@ -2252,11 +2308,7 @@ def test_parse_schedule_time_days():
 def test_parse_schedule_time_iso_timestamp():
     result = TelegramBridge._parse_schedule_time("2030-06-15T09:30:00+00:00")
     assert result is not None
-    assert result.year == 2030
-    assert result.month == 6
-    assert result.day == 15
-    assert result.hour == 9
-    assert result.minute == 30
+    assert (result.year, result.month, result.day, result.hour, result.minute) == (2030, 6, 15, 9, 30)
 
 
 def test_parse_schedule_time_invalid_returns_none():

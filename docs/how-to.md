@@ -152,6 +152,8 @@ Example:
 
 The bot replies with the scheduled execution time. When the time arrives, the stored prompt is sent to the agent and the reply is posted back to the chat as a reply to your `/schedule` message.
 
+The prompt may also continue on following lines. Everything after the time spec is stored verbatim, so multiline prompts keep their line breaks.
+
 If no active session exists when the scheduled time arrives, the bot will report that the task could not be run automatically.
 
 ## 9. Inspect and cancel scheduled follow-ups

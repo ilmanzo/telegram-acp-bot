@@ -84,6 +84,8 @@ In addition to the agent-driven path, users can schedule a `prompt_agent` task d
 
 Supported time formats are: `30s`, `10m`, `2h`, `1d`, or an ISO timestamp with an explicit timezone offset such as `2026-04-11T10:00:00+00:00`.
 
+The prompt text can span multiple lines. Everything after the time spec is preserved as-is and stored in the scheduled `prompt_agent` task.
+
 Example interaction:
 
 ```text
