@@ -1,10 +1,12 @@
 """Configuration for the pytest test suite."""
 
+from pathlib import Path
+
 import pytest
 
 
 @pytest.fixture(autouse=True)
-def isolate_home_dir(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def isolate_home_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Redirect HOME and XDG_CONFIG_HOME to a temporary directory.
 
     Prevents `_find_config_file()` from accidentally discovering real config
