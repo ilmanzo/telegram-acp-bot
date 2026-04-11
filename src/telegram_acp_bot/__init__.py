@@ -152,9 +152,10 @@ def _default_mcp_servers(
     """Return MCP servers to expose to the ACP agent.
 
     Always includes the internal ``telegram-channel`` server.
-    External servers from the config file are appended after it.
-    If an external server name conflicts with the internal one, the external
-    server overrides it.
+    External servers from the config file are added after it, except when an
+    external ``telegram-channel`` definition overrides the internal one. In
+    that case, the external server replaces the internal entry and keeps its
+    position in the resulting tuple.
     """
     internal = McpServerStdio(
         name="telegram-channel",

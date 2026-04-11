@@ -193,6 +193,11 @@ def test_mcp_servers_entry_not_object(tmp_path: Path) -> None:
         load_config_file(write_config(tmp_path, {"mcp_servers": {"bad": "string"}}))
 
 
+def test_mcp_servers_name_must_match_slug_pattern(tmp_path: Path) -> None:
+    with pytest.raises(ConfigFileError, match=r"must match \^\[a-z0-9-_\]\+\$"):
+        load_config_file(write_config(tmp_path, {"mcp_servers": {"Bad Name": {"command": "x"}}}))
+
+
 def test_mcp_servers_missing_transport(tmp_path: Path) -> None:
     with pytest.raises(ConfigFileError, match="must define 'command'"):
         load_config_file(write_config(tmp_path, {"mcp_servers": {"srv": {"args": []}}}))

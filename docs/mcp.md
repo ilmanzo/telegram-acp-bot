@@ -186,6 +186,7 @@ All configured servers are merged with the internal one and passed to every ACP 
 
 Fields:
 
+- key name — server identifier exposed to ACP; must match `^[a-z0-9-_]+$`
 - `command` (required) — path to the executable
 - `args` (optional) — list of string arguments
 - `env` (optional) — object of `string → string` environment variables
@@ -207,6 +208,7 @@ Fields:
 
 Fields:
 
+- key name — server identifier exposed to ACP; must match `^[a-z0-9-_]+$`
 - `url` (required) — URL of the remote MCP server
 - `headers` (optional) — object of `string → string` HTTP headers
 

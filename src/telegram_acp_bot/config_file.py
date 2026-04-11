@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ _VALID_PERMISSION_MODES = frozenset({"ask", "approve", "deny"})
 _VALID_PERMISSION_EVENT_OUTPUTS = frozenset({"stdout", "off"})
 _VALID_LOG_FORMATS = frozenset({"text", "json"})
 _VALID_ACTIVITY_MODES = frozenset({"compact", "normal", "verbose"})
+_MCP_SERVER_NAME_RE = re.compile(r"^[a-z0-9-_]+$")
 
 
 class ConfigFileError(ValueError):
@@ -116,6 +118,8 @@ def _validate_mcp_servers_section(servers: dict[str, Any], path: Path) -> None:
 
 
 def _validate_mcp_server_entry(name: str, server: dict[str, Any], path: Path) -> None:
+    if not _MCP_SERVER_NAME_RE.fullmatch(name):
+        raise _err(path, f"MCP server name {name!r} must match ^[a-z0-9-_]+$ (lowercase, no spaces)")
     if not isinstance(server, dict):
         raise _err(path, f"MCP server {name!r} must be a JSON object")
     has_command = "command" in server
