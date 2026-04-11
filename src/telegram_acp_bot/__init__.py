@@ -312,14 +312,16 @@ def _find_config_file() -> Path | None:
 
     Returns the first existing config file from:
     1. ./.telegram_acp_bot/config.json
-    2. ~/.config/telegram_acp_bot/config.json
+    2. $XDG_CONFIG_HOME/telegram_acp_bot/config.json
+       (or ~/.config/telegram_acp_bot/config.json when XDG_CONFIG_HOME is unset)
     3. ~/.telegram_acp_bot/config.json
 
     Returns None if no config file is found.
     """
+    xdg_config_home = Path(os.environ.get("XDG_CONFIG_HOME") or "~/.config").expanduser()
     candidates = [
         Path(".telegram_acp_bot/config.json"),
-        Path("~/.config/telegram_acp_bot/config.json").expanduser(),
+        xdg_config_home / "telegram_acp_bot" / "config.json",
         Path("~/.telegram_acp_bot/config.json").expanduser(),
     ]
 
