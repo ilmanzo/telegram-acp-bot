@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ _VALID_PERMISSION_MODES = frozenset({"ask", "approve", "deny"})
 _VALID_PERMISSION_EVENT_OUTPUTS = frozenset({"stdout", "off"})
 _VALID_LOG_FORMATS = frozenset({"text", "json"})
 _VALID_ACTIVITY_MODES = frozenset({"compact", "normal", "verbose"})
+_MCP_SERVER_NAME_RE = re.compile(r"^[a-z0-9-_]+$")
 
 
 class ConfigFileError(ValueError):
@@ -54,6 +56,8 @@ def _validate_config(data: dict[str, Any], path: Path) -> None:
         _validate_telegram_section(data["telegram"], path)
     if "acp" in data:
         _validate_acp_section(data["acp"], path)
+    if "mcp_servers" in data:
+        _validate_mcp_servers_section(data["mcp_servers"], path)
 
 
 def _validate_telegram_section(tg: dict[str, Any], path: Path) -> None:
@@ -104,3 +108,51 @@ def _validate_acp_section(acp: dict[str, Any], path: Path) -> None:
         isinstance(acp["connect_timeout"], bool) or not isinstance(acp["connect_timeout"], (int, float))
     ):
         raise _err(path, "'acp.connect_timeout' must be a number")
+
+
+def _validate_mcp_servers_section(servers: dict[str, Any], path: Path) -> None:
+    if not isinstance(servers, dict):
+        raise _err(path, "'mcp_servers' must be a JSON object")
+    for name, server in servers.items():
+        _validate_mcp_server_entry(name, server, path)
+
+
+def _validate_mcp_server_entry(name: str, server: dict[str, Any], path: Path) -> None:
+    if not _MCP_SERVER_NAME_RE.fullmatch(name):
+        raise _err(path, f"MCP server name {name!r} must match ^[a-z0-9-_]+$ (lowercase, no spaces)")
+    if not isinstance(server, dict):
+        raise _err(path, f"MCP server {name!r} must be a JSON object")
+    has_command = "command" in server
+    has_url = "url" in server
+    if not has_command and not has_url:
+        raise _err(path, f"MCP server {name!r} must define 'command' (stdio) or 'url' (remote)")
+    if has_command and has_url:
+        raise _err(path, f"MCP server {name!r} cannot define both 'command' and 'url'")
+    if has_command:
+        _validate_stdio_server(name, server, path)
+    if has_url:
+        _validate_http_server(name, server, path)
+
+
+def _validate_stdio_server(name: str, server: dict[str, Any], path: Path) -> None:
+    if not isinstance(server["command"], str):
+        raise _err(path, f"MCP server {name!r} 'command' must be a string")
+    if "args" in server:
+        args = server["args"]
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            raise _err(path, f"MCP server {name!r} 'args' must be a list of strings")
+    if "env" in server:
+        env = server["env"]
+        if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+            raise _err(path, f"MCP server {name!r} 'env' must be an object of string → string")
+
+
+def _validate_http_server(name: str, server: dict[str, Any], path: Path) -> None:
+    if not isinstance(server["url"], str):
+        raise _err(path, f"MCP server {name!r} 'url' must be a string")
+    if "headers" in server:
+        headers = server["headers"]
+        if not isinstance(headers, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in headers.items()
+        ):
+            raise _err(path, f"MCP server {name!r} 'headers' must be an object of string → string")
