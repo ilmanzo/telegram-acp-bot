@@ -2198,6 +2198,8 @@ async def test_schedule_prompt_uses_effective_message_for_edited_command(tmp_pat
     assert len(tasks) == 1
     assert tasks[0].anchor_message_id == anchor_message_id
     assert tasks[0].prompt_text == "Send report"
+    assert effective_message is not None
+    assert effective_message.replies[-1].startswith("Scheduled for ")
 
 
 async def test_schedule_prompt_rejects_invalid_time_spec(tmp_path: Path):
@@ -2312,6 +2314,10 @@ async def test_schedule_prompt_requires_anchor_message(tmp_path: Path):
     await bridge.schedule_prompt(update, make_context(args=["10m", "Ping"]))
 
     assert store.list_tasks_for_chat(chat_id=TEST_CHAT_ID) == []
+
+
+async def test_reply_message_returns_none_without_message():
+    assert await TelegramBridge._reply_message(None, "hello") is None
 
 
 async def test_schedule_prompt_denies_access_for_restricted_users(tmp_path: Path):

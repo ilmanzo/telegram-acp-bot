@@ -106,7 +106,6 @@ SCHEDULED_CHAT_BUSY_ERROR = "chat is busy"
 SCHEDULED_PROMPT_TRY_LOCK_TIMEOUT_SECONDS = 1e-9
 SCHEDULED_MISSING_ANCHOR_ERROR = "scheduled task is missing an anchor message"
 SCHEDULED_TASK_PREVIEW_MAX_CHARS = 72
-SCHEDULE_COMMAND_PART_COUNT = 3
 SCHEDULE_COMMAND_MIN_ARGS = 2
 _SCHEDULE_DELAY_RE = re.compile(r"^(\d+)(s|m|h|d)$", re.IGNORECASE)
 
@@ -315,25 +314,24 @@ class TelegramBridge:
         """Handle `/schedule <time> <prompt>` to queue a deferred agent prompt directly."""
         if not await self._require_access(update):
             return
+        message = cast(Message | None, getattr(update, "effective_message", None) or update.message)
         if self._scheduled_task_store is None:
-            await self._reply(update, "Scheduled tasks are unavailable.")
+            await self._reply_message(message, "Scheduled tasks are unavailable.")
             return
 
         chat_id = self._chat_id(update)
         parsed_command = self._parse_schedule_command(update=update, context=context)
         if parsed_command is None:
-            await self._reply(update, SCHEDULE_COMMAND_USAGE)
+            await self._reply_message(message, SCHEDULE_COMMAND_USAGE)
             return
         time_spec, prompt_text = parsed_command
 
         run_at = TelegramBridge._parse_schedule_time(time_spec, languages=self._config.schedule_languages)
         if run_at is None:
-            await self._reply(update, SCHEDULE_COMMAND_USAGE)
+            await self._reply_message(message, SCHEDULE_COMMAND_USAGE)
             return
 
-        message = cast(Message | None, getattr(update, "effective_message", None) or update.message)
         if message is None:
-            await self._reply(update, "Could not schedule task because no anchor message is available.")
             return
         anchor_message_id = message.message_id
 
@@ -352,11 +350,11 @@ class TelegramBridge:
             )
         except Exception:
             logger.exception("Failed to create scheduled task for chat %s", chat_id)
-            await self._reply(update, "Could not save scheduled task.")
+            await self._reply_message(message, "Could not save scheduled task.")
             return
 
         timestamp = task.run_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
-        await self._reply(update, f"Scheduled for {timestamp}. Use /scheduled to view or cancel.")
+        await self._reply_message(message, f"Scheduled for {timestamp}. Use /scheduled to view or cancel.")
 
     def _parse_schedule_command(
         self,
@@ -1583,6 +1581,12 @@ class TelegramBridge:
         if update.message is None:
             return None
         return await TelegramBridge._reply_markdown_message(update.message, text=text)
+
+    @staticmethod
+    async def _reply_message(message: Message | None, text: str) -> Message | None:
+        if message is None:
+            return None
+        return await TelegramBridge._reply_markdown_message(message, text=text)
 
     @staticmethod
     async def _reply_agent(update: Update, text: str) -> Message | None:

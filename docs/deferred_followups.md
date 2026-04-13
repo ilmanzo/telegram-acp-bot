@@ -92,9 +92,9 @@ Example interaction:
 User: /schedule tomorrow 9am Check for new review comments on the open PR
 Summarize what changed
 Flag anything blocking merge
-Bot: Scheduled for 2026-04-11 10:30 UTC. Use /scheduled to view or cancel.
+Bot: Scheduled for 2026-04-11 09:00 UTC. Use /scheduled to view or cancel.
 
-... 30 minutes later ...
+... the next day at 9:00 UTC ...
 
 Bot (replying to that command): There are 3 new comments on the PR.
 ```
