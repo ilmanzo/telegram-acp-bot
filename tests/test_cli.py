@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import runpy
 import sys
 from importlib import metadata
@@ -559,15 +558,11 @@ def test_main_auto_discovers_config_file(mocker, monkeypatch, tmp_path):
     config_path = config_dir / "config.json"
     config_path.write_text('{"telegram": {"bot_token": "AUTO_TOKEN"}, "acp": {"agent_command": "auto_agent"}}')
 
-    # Change to the temp directory and run without --config
-    original_cwd = os.getcwd()
-    try:
-        os.chdir(tmp_path)
-        assert main([]) == 0
-        config = mock_run_polling.call_args.args[0]
-        assert config.token == "AUTO_TOKEN"
-    finally:
-        os.chdir(original_cwd)
+    monkeypatch.chdir(tmp_path)
+
+    assert main([]) == 0
+    config = mock_run_polling.call_args.args[0]
+    assert config.token == "AUTO_TOKEN"
 
 
 def test_main_explicit_config_overrides_auto_discovery(mocker, monkeypatch, tmp_path):
@@ -588,12 +583,30 @@ def test_main_explicit_config_overrides_auto_discovery(mocker, monkeypatch, tmp_
         '{"telegram": {"bot_token": "EXPLICIT_TOKEN"}, "acp": {"agent_command": "explicit_agent"}}'
     )
 
-    # Change to the temp directory and run with explicit --config
-    original_cwd = os.getcwd()
-    try:
-        os.chdir(tmp_path)
-        assert main(["--config", str(explicit_config)]) == 0
-        config = mock_run_polling.call_args.args[0]
-        assert config.token == "EXPLICIT_TOKEN"
-    finally:
-        os.chdir(original_cwd)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["--config", str(explicit_config)]) == 0
+    config = mock_run_polling.call_args.args[0]
+    assert config.token == "EXPLICIT_TOKEN"
+
+
+def test_main_auto_discovers_config_from_xdg_config_home(mocker, monkeypatch, tmp_path):
+    """Automatic discovery respects XDG_CONFIG_HOME before the legacy home path."""
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("ACP_AGENT_COMMAND", raising=False)
+    mock_run_polling = mocker.patch("telegram_acp_bot.run_polling", return_value=0)
+    config_dir = tmp_path / "xdg" / "telegram_acp_bot"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "config.json"
+    config_path.write_text('{"telegram": {"bot_token": "XDG_TOKEN"}, "acp": {"agent_command": "xdg_agent"}}')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+    assert main([]) == 0
+    config = mock_run_polling.call_args.args[0]
+    assert config.token == "XDG_TOKEN"
+
+
+def test_main_rejects_blank_explicit_config_path():
+    """Blank explicit --config values fail instead of falling back to discovery."""
+    with pytest.raises(SystemExit, match="2"):
+        main(["--config", "   "])

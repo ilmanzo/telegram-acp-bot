@@ -13,10 +13,10 @@ You can mix layers freely. A typical setup uses a config file for static values 
 The bot automatically loads configuration from the following locations (in order):
 
 1. `./.telegram_acp_bot/config.json` (project-local)
-2. `~/.config/telegram_acp_bot/config.json` (default config-directory path)
+2. `{envvar}`XDG_CONFIG_HOME`/telegram_acp_bot/config.json` (or `~/.config/telegram_acp_bot/config.json` when unset)
 3. `~/.telegram_acp_bot/config.json` (legacy)
 
-The first existing file is used. You can also specify an explicit path with `--config`.
+The first readable file is used. You can also specify an explicit path with `--config`.
 
 ```bash
 # Automatic discovery (no --config needed if file exists)

@@ -310,7 +310,7 @@ def _run_bot_loop(
 def _find_config_file() -> Path | None:
     """Find a config file from standard locations.
 
-    Returns the first existing config file from:
+    Returns the first readable config file from:
     1. ./.telegram_acp_bot/config.json
     2. $XDG_CONFIG_HOME/telegram_acp_bot/config.json
        (or ~/.config/telegram_acp_bot/config.json when XDG_CONFIG_HOME is unset)
@@ -326,9 +326,32 @@ def _find_config_file() -> Path | None:
     ]
 
     for path in candidates:
-        if path.exists():
+        if path.is_file():
             return path
     return None
+
+
+def _load_preparsed_config(
+    parser: argparse.ArgumentParser,
+    config_arg: str | None,
+) -> dict[str, Any]:
+    """Load config-file defaults selected during pre-parsing."""
+    if config_arg is not None:
+        if not config_arg.strip():
+            parser.error("--config must not be empty or whitespace")
+        config_path = Path(config_arg).expanduser()
+    else:
+        config_path = _find_config_file()
+
+    if config_path is None:
+        return {}
+
+    try:
+        config_data = load_config_file(config_path)
+    except ConfigFileError as exc:
+        parser.error(str(exc))
+    _apply_config_file_defaults(parser, config_data)
+    return config_data
 
 
 def main(args: list[str] | None = None) -> int:
@@ -346,20 +369,7 @@ def main(args: list[str] | None = None) -> int:
     # Pre-parse to extract --config before full argument resolution
     pre_opts, _ = parser.parse_known_args(args=argv)
 
-    config_data: dict[str, Any] = {}
-    if pre_opts.config is not None:
-        if not pre_opts.config.strip():
-            parser.error("--config must not be empty or whitespace")
-        config_path = Path(pre_opts.config).expanduser()
-    else:
-        config_path = _find_config_file()
-
-    if config_path is not None:
-        try:
-            config_data = load_config_file(config_path)
-        except ConfigFileError as exc:
-            parser.error(str(exc))
-        _apply_config_file_defaults(parser, config_data)
+    config_data = _load_preparsed_config(parser, pre_opts.config)
 
     # Full parse: catches unknown/invalid flags for both the main command and subcommands.
     opts = parser.parse_args(args=argv)

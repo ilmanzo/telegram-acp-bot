@@ -15,5 +15,9 @@ def isolate_home_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     so tests that exercise auto-discovery can still do so by creating the file
     under their own `tmp_path` and changing into it.
     """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    home_dir = tmp_path / "home"
+    xdg_config_home = tmp_path / "xdg-config"
+    home_dir.mkdir()
+    xdg_config_home.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config_home))
