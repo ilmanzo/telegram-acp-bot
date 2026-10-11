@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import dateparser
+import json
+from acp import RequestError
 from telegram import (
     Bot,
     CallbackQuery,
@@ -1265,6 +1267,20 @@ class TelegramBridge:
                 update,
                 "Agent output exceeded ACP stdio limit. Restart with a higher `--acp-stdio-limit` "
                 "(or `ACP_STDIO_LIMIT`).",
+            )
+            return None
+        except RequestError as exc:
+            logger.exception("Agent prompt failed")
+            err_msg = str(exc)
+            with suppress(Exception):
+                err_data = json.loads(err_msg)
+                if isinstance(err_data, list) and err_data and "error" in err_data[0]:
+                    err_msg = err_data[0]["error"].get("message", err_msg)
+                elif isinstance(err_data, dict) and "error" in err_data:
+                    err_msg = err_data["error"].get("message", err_msg)
+            await self._reply(
+                update,
+                f"Agent prompt failed: {err_msg}",
             )
             return None
         finally:

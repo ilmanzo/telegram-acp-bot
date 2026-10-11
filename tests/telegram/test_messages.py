@@ -385,6 +385,68 @@ async def test_on_message_reports_acp_stdio_limit_error():
     assert "Agent output exceeded ACP stdio limit." in update.message.replies[-1]
 
 
+async def test_on_message_handles_request_error():
+    class RequestErrorService:
+        async def new_session(self, *, chat_id: int, workspace):
+            del workspace
+            return f"s-{chat_id}"
+
+        async def prompt(self, *, chat_id: int, text: str, images=(), files=()):
+            del chat_id, images, files
+            from acp import RequestError
+            import json
+
+            # Support switching behavior based on text input
+            if text == "dict":
+                err_json = json.dumps({"error": {"message": "Parsed JSON dict message"}})
+            else:
+                err_json = json.dumps([{"error": {"message": "Parsed JSON array message"}}])
+
+            # We initialize RequestError using the standard constructor since
+            # the helper classmethods assume dicts/strings for 'data'.
+            raise RequestError(-32600, err_json)
+
+        def get_workspace(self, *, chat_id: int):
+            del chat_id
+
+        async def cancel(self, *, chat_id: int) -> bool:
+            del chat_id
+            return False
+
+        async def stop(self, *, chat_id: int) -> bool:
+            del chat_id
+            return False
+
+        async def clear(self, *, chat_id: int) -> bool:
+            del chat_id
+            return False
+
+        def get_permission_policy(self, *, chat_id: int):
+            del chat_id
+
+        async def set_session_permission_mode(self, *, chat_id: int, mode):
+            del chat_id, mode
+            return False
+
+        async def set_next_prompt_auto_approve(self, *, chat_id: int, enabled: bool):
+            del chat_id, enabled
+            return False
+
+    config = make_config(token="TOKEN", allowed_user_ids=[], workspace=".")
+    bridge = TelegramBridge(config=config, agent_service=cast(AgentService, RequestErrorService()))
+    update = make_update(text="hello")
+    context = make_context()
+
+    await bridge.on_message(update, context)
+
+    assert update.message is not None
+    assert "Agent prompt failed: Parsed JSON array message" in update.message.replies[-1]
+
+    update = make_update(text="dict")
+    await bridge.on_message(update, context)
+    assert "Agent prompt failed: Parsed JSON dict message" in update.message.replies[-1]
+
+
 async def test_on_message_reraises_unrelated_value_error():
     class GenericValueErrorService:
         async def new_session(self, *, chat_id: int, workspace):
