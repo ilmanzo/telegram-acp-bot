@@ -120,6 +120,7 @@ class FakeConnection:
         self.initialized = False
         self.cwd: str | None = None
         self.prompt_calls: list[str] = []
+        self.last_prompt_blocks: list | None = None
         self.list_calls: list[tuple[str | None, str | None]] = []
         self._supports_load_session = supports_load_session
         self._supports_session_list = supports_session_list
@@ -157,6 +158,7 @@ class FakeConnection:
 
     async def prompt(self, *, session_id: str, prompt: list) -> SimpleNamespace:
         self.prompt_calls.append(session_id)
+        self.last_prompt_blocks = list(prompt)
         assert prompt
         assert self.client is not None
         update = AgentMessageChunk(content=text_block("hello from acp"), session_update="agent_message_chunk")

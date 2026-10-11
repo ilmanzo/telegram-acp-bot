@@ -818,6 +818,36 @@ async def test_permission_policy_session_and_next_prompt(tmp_path: Path):
     assert service.get_permission_policy(chat_id=999) is None
 
 
+async def test_prompt_without_text_omits_text_block(tmp_path: Path):
+    process = FakeProcess()
+    connection = FakeConnection(session_id="no-text")
+
+    async def fake_spawn(program: str, *args: str, **kwargs):
+        del program, args, kwargs
+        return process
+
+    def fake_connect(client, input_stream, output_stream):
+        del input_stream, output_stream
+        connection.client = client
+        return connection
+
+    service = AcpAgentService(
+        SessionRegistry(),
+        program="agent",
+        args=[],
+        spawner=fake_spawn,
+        connector=fake_connect,
+    )
+    await service.new_session(chat_id=1, workspace=tmp_path)
+    image = PromptImage(data_base64=base64.b64encode(b"img").decode("ascii"), mime_type="image/png")
+    reply = await service.prompt(chat_id=1, text="", images=(image,))
+
+    assert reply is not None
+    assert connection.last_prompt_blocks is not None
+    assert len(connection.last_prompt_blocks) == 1
+    assert connection.last_prompt_blocks[0].type == "image"
+
+
 async def test_decide_permission_states(tmp_path: Path):
     process = FakeProcess()
     connection = FakeConnection(session_id="perm")

@@ -1032,7 +1032,7 @@ class TelegramBridge:
         message = update.message
         if message is None:
             return None
-        text = message.text or message.caption or ""
+        text = (message.text or message.caption or "").strip()
         images = await self._extract_prompt_images(message=message, context=context)
         files = await self._extract_prompt_files(message=message, context=context)
         if not text and not images and not files:

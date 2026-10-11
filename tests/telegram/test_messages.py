@@ -24,6 +24,19 @@ async def test_on_text_plain_reply_when_response_has_no_entities():
     assert update.message.reply_kwargs[-1] == {}
 
 
+async def test_on_message_whitespace_only_is_ignored():
+    bridge = make_bridge()
+    context = make_context()
+    init_update = make_update(text="/new")
+    await bridge.new_session(init_update, context)
+
+    update = make_update(text="   \n\t  ")
+    await bridge.on_message(update, context)
+
+    assert update.message is not None
+    assert len(update.message.replies) == 0
+
+
 async def test_on_message_with_photo_attachment():
     bridge = make_bridge()
     photo = [SimpleNamespace(file_id="p1")]
